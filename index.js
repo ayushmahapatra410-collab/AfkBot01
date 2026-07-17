@@ -7,7 +7,7 @@ app.get('/', (req, res) => res.send('Bot is running 24/7!'));
 app.listen(3000, () => console.log('Web server is running on port 3000'));
 
 // --- Bot ka Setup ---
-const serverIP = "brozgar_ultra18.aternos.me"; // YAHAN APNE ATERNOS SERVER KA IP DAALNA MAT BHULNA!
+const serverIP = "berozgar_ultra18.aternos.me"; // YAHAN APNE ATERNOS SERVER KA IP DAALNA MAT BHULNA!
 const botName = "247_aalu_khalo";
 
 function createBot() {
