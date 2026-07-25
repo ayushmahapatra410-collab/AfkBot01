@@ -8,7 +8,7 @@ app.get('/', (req, res) => res.send('Bot is Running 24/7!'));
 app.listen(port, () => console.log(`Web server listening on port ${port}`));
 
 // --- Configuration ---
-const SERVER_IP = 'your-server.aternos.me'; // Apna Aternos IP dalo
+const SERVER_IP = 'nalle_logz01.aternos.me'; // Apna Aternos IP dalo
 const BOT_USERNAME = 'AFK_Bot';             
 const VERSION = '1.20.4';                   // Apna version dalo
 
