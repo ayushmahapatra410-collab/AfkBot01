@@ -2,7 +2,7 @@ const mineflayer = require('mineflayer');
 const express = require('express');
 const axios = require('axios');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalFollow } = goals;
+const { GoalFollow, GoalXZ } = goals;
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -24,6 +24,7 @@ const MODEL_NAME = 'openai/gpt-6-astra';
 let afkInterval = null;
 let currentFollowTarget = null;
 let isExploring = false;
+let isReconnecting = false;
 
 // Memory Buffer
 let chatMemory = [];
@@ -40,6 +41,7 @@ function logGameEvent(event) {
 
 function startBot() {
   console.log(`Connecting Cassie to ${SERVER_IP}...`);
+  isReconnecting = false;
 
   const bot = mineflayer.createBot({
     host: SERVER_IP,
@@ -51,19 +53,23 @@ function startBot() {
 
   bot.on('spawn', () => {
     console.log(`✅ ${bot.username} spawned!`);
-    const mcData = require('minecraft-data')(bot.version);
-    const defaultMove = new Movements(bot, mcData);
+    try {
+      const mcData = require('minecraft-data')(bot.version);
+      const defaultMove = new Movements(bot, mcData);
 
-    // Movements fix taaki slab par path drop na ho
-    defaultMove.canDig = false;           
-    defaultMove.allowParkour = true;      
-    defaultMove.allowSprinting = true;    
-    defaultMove.canOpenDoors = true;      
-    defaultMove.maxDropDown = 5;          
-    defaultMove.liquidCost = 25;
-    defaultMove.entityCost = 0; // Entity ko block na mane
+      // Stable movement settings
+      defaultMove.canDig = false;           
+      defaultMove.allowParkour = true;      
+      defaultMove.allowSprinting = true;    
+      defaultMove.canOpenDoors = true;      
+      defaultMove.maxDropDown = 4;          
+      defaultMove.liquidCost = 25;
+      defaultMove.entityCost = 0; // Player hitbox collision bypass[cite: 3]
 
-    bot.pathfinder.setMovements(defaultMove);
+      bot.pathfinder.setMovements(defaultMove);
+    } catch (e) {
+      console.error('Movement init error:', e.message);
+    }
 
     setTimeout(() => bot.chat(`/skin ${DEFAULT_SKIN}`), 3000);
     startSafeAfk(bot);
@@ -71,65 +77,33 @@ function startBot() {
 
   bot.on('death', () => {
     logGameEvent('Mar gayi!');
-    currentFollowTarget = null;
-    isExploring = false;
-    setTimeout(() => bot.respawn(), 2000);
+    stopAll(bot);
+    setTimeout(() => {
+      try { bot.respawn(); } catch (e) {}
+    }, 2000);
   });
 
-  // SLAB & MANUAL OVERRIDE ENGINE (Physics Tick)
+  // SLAB & STEP AUTO JUMP (Sirf obstruction par tap karega, direct forward fight nahi karega)
   bot.on('physicsTick', () => {
-    if (!currentFollowTarget) return;
+    if (!currentFollowTarget && !isExploring) return;
 
-    const target = bot.players[currentFollowTarget]?.entity;
-    if (!target) return;
-
-    const dist = bot.entity.position.distanceTo(target.position);
-
-    // Agar 2 blocks ke andar hai toh aaram se khadi rahe
-    if (dist <= 2.2) {
-      bot.clearControlStates();
-      return;
-    }
-
-    // DIRECT LINE OF SIGHT OVERRIDE
-    // Agar samne player dikh raha hai (chahe raste me slab ho), pathfinder ko dump karo aur seedha aage bado
-    if (bot.canSeeEntity(target)) {
-      // Direct look at player
-      bot.lookAt(target.position.offset(0, target.height * 0.85, 0), true);
-      bot.setControlState('forward', true);
-      bot.setControlState('sprint', dist > 4);
-
-      // Check karo ki aage slab/block par atki hai kya
-      const isStuckOrCollided = bot.entity.isCollidedHorizontally;
-      const blockInFront = bot.blockAtCursor(1.5);
-      const isSlabAhead = blockInFront && blockInFront.name.includes('slab');
-
-      // Agar samne slab hai ya body takra rahi hai toh direct jump do bina peeche ghoome
-      if (isStuckOrCollided || isSlabAhead) {
-        bot.setControlState('jump', true);
-      } else {
-        bot.setControlState('jump', false);
-      }
+    // Agar pathfinder chal raha hai aur samne slab ya 1 block aa gaya to jump tap kare
+    if (bot.entity.isCollidedHorizontally) {
+      bot.setControlState('jump', true);
     } else {
-      // Agar player samne nahi dikh raha (deewar ke peeche hai), tab auto jump on collision
-      if (bot.entity.isCollidedHorizontally) {
-        bot.setControlState('jump', true);
-      } else {
-        bot.setControlState('jump', false);
-      }
+      bot.setControlState('jump', false);
     }
   });
 
-  // Pathfinder ko faltu rasta cancel karne se roko agar player visible hai
+  // Pathfinder stuck hone par safe recover
   bot.on('path_reset', (reason) => {
     if (currentFollowTarget && reason === 'noPath') {
       const target = bot.players[currentFollowTarget]?.entity;
-      if (!target || !bot.canSeeEntity(target)) {
-        bot.chat(`@${currentFollowTarget} Rasta nahi mil raha, thoda aage aao!`);
+      if (!target) {
+        bot.chat(`@${currentFollowTarget} Rasta nahi mil raha, paas aao!`);
         currentFollowTarget = null;
         bot.pathfinder.stop();
       }
-      // Agar target visible hai to pathfinder ko ignore karega aur physicsTick seedha walk karwayega
     }
   });
 
@@ -159,20 +133,36 @@ function startBot() {
     }
 
     // Owner Stop Override
-    if (isOwner(username) && (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop')) {
-      stopAll(bot, 'Ruk gayi, sab cancel!');
+    if (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop') {
+      if (isOwner(username) || currentFollowTarget === username) {
+        stopAll(bot, 'Ruk gayi, sab cancel!');
+      }
       return;
     }
 
     // Chat Prefix '!'
     if (!cleanMsg.startsWith('!')) return;
-    const query = cleanMsg.substring(1).trim();
+    const query = cleanMsg.substring(1).trim().toLowerCase();
     if (!query) return;
 
+    // INSTANT FOLLOW SHORTCUT (AI ka wait kiye bina direct execution taaki lag se disconnect na ho)
+    if (query.includes('pass aa') || query.includes('follow') || query.includes('aaja') || query.includes('mere pass')) {
+      isExploring = false;
+      const player = bot.players[username]?.entity;
+      if (player) {
+        currentFollowTarget = username;
+        bot.pathfinder.setGoal(new GoalFollow(player, 2.2), true);
+        bot.chat(`Aa rahi hu @${username}!`);
+      } else {
+        bot.chat(`@${username} Tu render range me nahi hai, thoda samne aa!`);
+      }
+      return;
+    }
+
     try {
-      await handleCassieAI(bot, username, query);
+      await handleCassieAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
-      console.error('AI Error:', err.message);
+      console.error('AI Error:', err.response?.data || err.message);
       bot.chat(`@${username} Mera dimag lag ho gaya, dobara bolna!`);
     }
   });
@@ -198,14 +188,18 @@ function startBot() {
     }
   }, 1400);
 
+  bot.on('kicked', (reason) => console.log(`[Kicked from Aternos]: ${reason}`));
+
   bot.on('end', () => {
+    if (isReconnecting) return;
+    isReconnecting = true;
+    console.log('🔴 Disconnected. Waiting 25s before reconnecting...');
     if (afkInterval) clearInterval(afkInterval);
-    currentFollowTarget = null;
-    isExploring = false;
+    stopAll(bot);
     setTimeout(startBot, 25000);
   });
 
-  bot.on('error', (e) => console.error(e.message));
+  bot.on('error', (e) => console.error('[Bot Error]:', e.message));
 }
 
 // --- Critical Hit Combat ---
@@ -225,11 +219,14 @@ async function proAttack(bot, target) {
   }, 220);
 }
 
-// --- AI Brain (Strict Female Persona & Inventory Check) ---
+// --- AI Brain ---
 async function handleCassieAI(bot, sender, userPrompt) {
-  const senderIsOwner = isOwner(sender);
-  const botPos = bot.entity.position;
+  if (!OPENROUTER_API_KEY) {
+    bot.chat(`@${sender} OPENROUTER_API_KEY set nahi hai!`);
+    return;
+  }
 
+  const senderIsOwner = isOwner(sender);
   const invItems = bot.inventory.items().map(i => `${i.name} (x${i.count})`).join(', ') || 'Khali hai';
 
   const systemPrompt = `
@@ -244,7 +241,7 @@ Context:
 
 Rules:
 1. Don't invent items. Only mention items physically in your Inventory[cite: 2].
-2. If asked to follow, come, or move close ("aaja", "pass aa", "follow", "chalo"), select follow. NEVER select explore[cite: 2].
+2. If asked to follow, come, or move close, use the follow action[cite: 2].
 3. Only use explore if sender explicitly says "explore kar", "ghoom ke aa".
 4. Keep replies short, casual, and in cool girl Hinglish (under 60 chars).
 
@@ -265,14 +262,15 @@ ${senderIsOwner ? `- Follow someone: [[ACTION: {"type": "follow", "target": "<pl
     {
       model: MODEL_NAME,
       messages: [{ role: 'system', content: systemPrompt }, ...chatMemory],
-      max_tokens: 100,
+      max_tokens: 80,
       temperature: 0.6
     },
     {
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: 8000
     }
   );
 
@@ -284,7 +282,7 @@ ${senderIsOwner ? `- Follow someone: [[ACTION: {"type": "follow", "target": "<pl
 
   if (chatText) {
     if (chatText.length > 200) chatText = chatText.substring(0, 197) + '...';
-    bot.chat(chatText);
+    bot.chat(cleanChat(chatText));
   }
 
   if (actionMatch) {
@@ -295,6 +293,10 @@ ${senderIsOwner ? `- Follow someone: [[ACTION: {"type": "follow", "target": "<pl
       console.error('Action parse error:', e);
     }
   }
+}
+
+function cleanChat(str) {
+  return str.replace(/[\n\r]+/g, ' ').trim();
 }
 
 // --- Action Execution ---
@@ -308,7 +310,7 @@ async function executeAction(bot, sender, senderIsOwner, action) {
       const player = bot.players[targetName]?.entity;
       if (player) {
         currentFollowTarget = targetName;
-        bot.pathfinder.setGoal(new GoalFollow(player, 2.0), true);
+        bot.pathfinder.setGoal(new GoalFollow(player, 2.2), true);
       } else {
         bot.chat(`@${sender} tu render range se bahar hai, thoda paas aa!`);
       }
@@ -343,13 +345,15 @@ async function executeAction(bot, sender, senderIsOwner, action) {
   }
 }
 
-// --- Explore Cycle ---
+// --- Explore Cycle (GoalXZ used to prevent crash) ---
 function runExploreCycle(bot) {
   if (!isExploring) return;
   const pos = bot.entity.position;
-  const rx = pos.x + (Math.random() - 0.5) * 30;
-  const rz = pos.z + (Math.random() - 0.5) * 30;
-  bot.pathfinder.setGoal(new GoalFollow({ position: bot.entity.position.offset(rx - pos.x, 0, rz - pos.z) }, 1));
+  const rx = pos.x + (Math.random() - 0.5) * 20;
+  const rz = pos.z + (Math.random() - 0.5) * 20;
+
+  // Real GoalXZ (no fake entity object)
+  bot.pathfinder.setGoal(new GoalXZ(rx, rz));
 
   setTimeout(() => {
     if (isExploring) runExploreCycle(bot);
@@ -396,5 +400,9 @@ function startSafeAfk(bot) {
     if (Math.random() > 0.5) bot.swingArm('right');
   }, 9000);
 }
+
+// Global Crash Handlers taaki process band na ho
+process.on('uncaughtException', (err) => console.error('[Uncaught Exception]:', err.message));
+process.on('unhandledRejection', (reason) => console.error('[Unhandled Rejection]:', reason));
 
 startBot();
