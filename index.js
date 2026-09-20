@@ -4,25 +4,27 @@ const axios = require('axios');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalFollow } = goals;
 
-// --- Web Server (24/7 Hosting ke liye) ---
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Smart Girl AI Bot is Online!'));
-app.listen(port, () => console.log(`Web server listening on port ${port}`));
+app.get('/', (req, res) => res.send('Cassie is Online!'));
+app.listen(port, () => console.log(`Listening on port ${port}`));
 
-// --- Configuration ---
+// --- Config ---
 const SERVER_IP = 'YSsmpontop.aternos.me';
-const BOT_USERNAME = 'Cassie';                 // Bot ka username
+const BOT_USERNAME = 'Cassie';
 const VERSION = '1.20.4';
-const GIRL_SKIN_NAME = 'chloepowell';           // Default girl skin (SkinsRestorer ke liye)
-const OWNER_USERNAME = 'NotGamerSpark'; // Apna exact Minecraft IGN yahan daalo
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || 'YOUR_OPENROUTER_API_KEY';
+const DEFAULT_SKIN = 'chloepowell';
+const OWNER_USERNAME = 'NotGamerSpark'; // Screenshot ke according tera IGN set kar diya
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const MODEL_NAME = 'openai/gpt-4o-mini';
 
 let afkInterval = null;
+let currentFollowTarget = null;
+// Memory buffer (Last 6 messages yaad rakhegi)
+let chatMemory = [];
 
 function startBot() {
-  console.log(`Connecting to ${SERVER_IP}...`);
+  console.log(`Connecting Cassie to ${SERVER_IP}...`);
 
   const bot = mineflayer.createBot({
     host: SERVER_IP,
@@ -32,135 +34,139 @@ function startBot() {
 
   bot.loadPlugin(pathfinder);
 
-  // 1. Spawn Event (Skin Setup, Pathfinder Config & AFK Loop)
   bot.on('spawn', () => {
-    console.log(`✅ ${bot.username} spawned successfully!`);
-
-    // Pathfinder Safety Configuration (Lava & Fall damage se bachne ke liye)
+    console.log(`✅ ${bot.username} spawned!`);
     const mcData = require('minecraft-data')(bot.version);
     const defaultMove = new Movements(bot, mcData);
-    defaultMove.canDig = false;          // Apne niche ka block tod kar na gire
-    defaultMove.allow1by1towers = false; // Faltu tower na banaye
-    defaultMove.maxDropDown = 3;         // 3 blocks se zyada unchi jagah se na kude
-    defaultMove.liquidCost = 50;         // Lava/paani ko avoid kare
+    defaultMove.canDig = true; // Mining allow ki
+    defaultMove.allow1by1towers = false;
+    defaultMove.maxDropDown = 4;
+    defaultMove.allowParkour = true;
     bot.pathfinder.setMovements(defaultMove);
 
-    // Auto Girl Skin lagana (3 seconds baad)
-    setTimeout(() => {
-      bot.chat(`/skin ${GIRL_SKIN_NAME}`);
-    }, 3000);
-
-    // Safe Anti-AFK Human movement shuru karein
-    startSafeAfkMovement(bot);
+    setTimeout(() => bot.chat(`/skin ${DEFAULT_SKIN}`), 3000);
+    startSafeAfk(bot);
   });
 
-  // 2. Auto-Respawn on Death
   bot.on('death', () => {
-    console.log('💀 Bot mar gaya! 2 seconds me respawn ho raha hai...');
-    setTimeout(() => {
-      bot.respawn();
-    }, 2000);
+    console.log('💀 Respawning...');
+    currentFollowTarget = null;
+    setTimeout(() => bot.respawn(), 2000);
   });
 
-  // 3. Danger Detection: Hostile Mobs (Creepers/Zombies) se bachna
-  bot.on('entityMoved', (entity) => {
-    if (!['creeper', 'zombie', 'skeleton', 'spider'].includes(entity.name)) return;
-
-    const distance = bot.entity.position.distanceTo(entity.position);
-
-    // Agar mob 5 block ke andar aa jaye
-    if (distance < 5) {
-      if (entity.name === 'creeper') {
-        // Creeper dekhte hi ulti disha me bhaage
-        const awayVec = bot.entity.position.minus(entity.position).normalize();
-        bot.lookAt(bot.entity.position.plus(awayVec));
-        bot.setControlState('sprint', true);
-        bot.setControlState('forward', true);
-        setTimeout(() => bot.clearControlStates(), 1500);
-      } else {
-        // Zombie/Skeleton par attack swing kare
-        bot.lookAt(entity.position.offset(0, 1.5, 0));
-        bot.attack(entity);
-      }
-    }
-  });
-
-  // 4. Chat Commands & AI Brain
+  // Chat Router
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
 
-    // Owner Direct Command Execution (e.g., !cmd /skin Valkyrae ya !cmd /tp)
-    if (username === OWNER_USERNAME && cleanMsg.startsWith('!cmd ')) {
-      const runCommand = cleanMsg.replace('!cmd ', '').trim();
-      console.log(`[Admin Command] Running: ${runCommand}`);
-      bot.chat(runCommand);
+    // Owner direct command
+    if (cleanMsg.startsWith('!cmd ')) {
+      if (username !== OWNER_USERNAME) {
+        bot.chat(`@${username} Sirf owner (${OWNER_USERNAME}) commands chala sakte hain!`);
+        return;
+      }
+      bot.chat(cleanMsg.replace('!cmd ', '').trim());
       return;
     }
 
-    // AI Trigger Check
-    const isBotMentioned = cleanMsg.toLowerCase().includes(bot.username.toLowerCase()) || cleanMsg.startsWith('!');
-    if (!isBotMentioned) return;
+    // Owner stop shortcut
+    if (username === OWNER_USERNAME && (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop')) {
+      stopFollowing(bot, 'Ruk gayi!');
+      return;
+    }
+
+    // Chat prefix rule
+    if (!cleanMsg.startsWith('!')) return;
+    const query = cleanMsg.substring(1).trim();
+    if (!query) return;
 
     try {
-      await handleOpenRouterChat(bot, username, cleanMsg);
+      await handleCassieAI(bot, username, query);
     } catch (err) {
-      console.error('AI Chat Error:', err.message);
-      bot.chat(`@${username} Mera dimag thoda lag kar gaya, dobara bolna?`);
+      console.error('AI Error:', err.message);
+      bot.chat(`@${username} Dimag thoda lag ho gaya, wapas bolna!`);
     }
   });
 
-  // 5. Safe Reconnect & Cleanup
-  bot.on('kicked', (reason) => console.log(`⚠️ Kicked: ${reason}`));
+  // Mobs check
+  setInterval(() => {
+    if (bot.pathfinder.isMoving()) return;
+    const mob = bot.nearestEntity(e => 
+      ['creeper', 'zombie', 'skeleton'].includes(e.name) &&
+      bot.entity.position.distanceTo(e.position) < 5
+    );
+    if (mob) {
+      if (mob.name === 'creeper') {
+        const away = bot.entity.position.minus(mob.position).normalize();
+        bot.lookAt(bot.entity.position.plus(away));
+        bot.setControlState('sprint', true);
+        bot.setControlState('forward', true);
+        setTimeout(() => bot.clearControlStates(), 1200);
+      } else {
+        bot.attack(mob);
+      }
+    }
+  }, 2000);
+
   bot.on('end', () => {
-    console.log('🔴 Disconnected. 30 seconds baad reconnect karega...');
+    console.log('Disconnected. Reconnecting in 25s...');
     if (afkInterval) clearInterval(afkInterval);
-    setTimeout(startBot, 30000);
+    currentFollowTarget = null;
+    setTimeout(startBot, 25000);
   });
 
-  bot.on('error', (err) => console.error(`❌ Bot Error: ${err.message}`));
+  bot.on('error', (e) => console.error(e.message));
 }
 
-// --- OpenRouter AI Handler ---
-async function handleOpenRouterChat(bot, username, userMessage) {
+// --- AI Brain with Memory & Actions ---
+async function handleCassieAI(bot, sender, userPrompt) {
+  const isOwner = sender === OWNER_USERNAME;
   const botPos = bot.entity.position;
+
+  // Samne kaun sa block hai check karna
+  const targetBlock = bot.blockAtCursor(4);
+  const blockInFrontName = targetBlock ? targetBlock.name : 'air';
+
   const systemPrompt = `
-You are a smart, friendly female Minecraft companion named ${bot.username}.
-You play on a survival SMP. You speak natural, cool Hinglish (Hindi + English).
-Keep your chat responses short (under 80 characters) so they fit nicely in Minecraft chat.
+You are Cassie, an active human-like female Minecraft player on an SMP.
+NEVER talk like a robotic assistant. Do NOT say "Help karne ko ready hoon" or "dhyan do". Talk like a real gamer girl friend in casual Hinglish.
+Keep responses under 60 characters.
 
-Current Stats:
-- Health: ${Math.round(bot.health)}/20 | Food: ${Math.round(bot.food)}/20
-- Coordinates: X=${Math.round(botPos.x)}, Y=${Math.round(botPos.y)}, Z=${Math.round(botPos.z)}
-- Talking to: ${username}
+Status:
+- Talking to: ${sender} (Owner: ${isOwner})
+- Block right in front/crosshair: "${blockInFrontName}"
+- Health: ${Math.round(bot.health)}/20
+- Currently Following: ${currentFollowTarget || 'None'}
 
-If the user gives you a game command, add a JSON tag at the VERY END:
-- Follow player: [[ACTION: {"type": "follow", "target": "${username}"}]]
+Actions (Append JSON tag at the VERY END if action is asked):
+- Follow sender: [[ACTION: {"type": "follow", "target": "${sender}"}]]
+${isOwner ? `- Follow another player: [[ACTION: {"type": "follow", "target": "<player>"}]]` : ''}
 - Stop moving: [[ACTION: {"type": "stop"}]]
-- Run any server command: [[ACTION: {"type": "cmd", "cmd": "/skin <name>"}]]
-- Jump: [[ACTION: {"type": "jump"}]]
-
-Example response:
-"Haan bro bol, tere paas aa rahi hu! [[ACTION: {"type": "follow", "target": "${username}"}]]"
+- Mine block in front: [[ACTION: {"type": "mine"}]]
+- Run server command: [[ACTION: {"type": "cmd", "cmd": "/command"}]]
 `;
+
+  // Memory maintain (Last 6 messages)
+  chatMemory.push({ role: 'user', content: `${sender}: ${userPrompt}` });
+  if (chatMemory.length > 6) chatMemory.shift();
+
+  const messagesPayload = [
+    { role: 'system', content: systemPrompt },
+    ...chatMemory
+  ];
 
   const response = await axios.post(
     'https://openrouter.ai/api/v1/chat/completions',
     {
       model: MODEL_NAME,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `${username}: ${userMessage}` }
-      ],
-      max_tokens: 120,
-      temperature: 0.7
+      messages: messagesPayload,
+      max_tokens: 100,
+      temperature: 0.6
     },
     {
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://minecraft-smp.local',
-        'X-Title': 'Minecraft AI Companion'
+        'Content-Type': 'application/json'
       }
     }
   );
@@ -168,6 +174,9 @@ Example response:
   const rawReply = response.data.choices[0].message.content.trim();
   const actionMatch = rawReply.match(/\[\[ACTION:\s*(\{.*?\})\]\]/);
   let chatText = rawReply.replace(/\[\[ACTION:\s*(\{.*?\})\]\]/, '').trim();
+
+  // Assistant response ko bhi memory me save karo
+  chatMemory.push({ role: 'assistant', content: chatText });
 
   if (chatText) {
     if (chatText.length > 200) chatText = chatText.substring(0, 197) + '...';
@@ -177,75 +186,73 @@ Example response:
   if (actionMatch) {
     try {
       const action = JSON.parse(actionMatch[1]);
-      executeBotAction(bot, action, username);
+      executeAction(bot, sender, isOwner, action);
     } catch (e) {
-      console.error('Failed to parse AI action:', e);
+      console.error('Parse err:', e);
     }
   }
 }
 
-// --- Action Execution Function ---
-function executeBotAction(bot, action, defaultTarget) {
-  const targetName = action.target || defaultTarget;
-  const targetPlayer = bot.players[targetName]?.entity;
-
+// --- Action Handler ---
+async function executeAction(bot, sender, isOwner, action) {
   switch (action.type) {
-    case 'follow':
-      if (targetPlayer) {
-        bot.pathfinder.setGoal(new GoalFollow(targetPlayer, 2), true);
+    case 'follow': {
+      let targetName = action.target || sender;
+      if (!isOwner && targetName.toLowerCase() !== sender.toLowerCase()) targetName = sender;
+
+      const player = bot.players[targetName]?.entity;
+      if (player) {
+        currentFollowTarget = targetName;
+        bot.pathfinder.setGoal(new GoalFollow(player, 2), true);
       } else {
-        bot.chat(`Tu mujhe dikh nahi raha ${targetName}, thoda paas aa!`);
+        bot.chat(`@${sender} tu render range ke bahar hai, paas aa!`);
       }
       break;
+    }
 
-    case 'stop':
-      bot.pathfinder.stop();
-      bot.clearControlStates();
+    case 'mine': {
+      const block = bot.blockAtCursor(4);
+      if (block && block.name !== 'air' && block.name !== 'bedrock') {
+        try {
+          await bot.dig(block);
+          bot.chat(`Tod diya ${block.name}!`);
+        } catch (err) {
+          bot.chat(`Block toot nahi paya: ${err.message}`);
+        }
+      } else {
+        bot.chat(`Samne koi todne layak block nahi hai!`);
+      }
       break;
+    }
 
-    case 'cmd':
-      if (action.cmd) bot.chat(action.cmd);
+    case 'stop': {
+      if (isOwner || currentFollowTarget === sender) {
+        stopFollowing(bot, 'Ruk gayi!');
+      }
       break;
+    }
 
-    case 'jump':
-      bot.setControlState('jump', true);
-      setTimeout(() => bot.setControlState('jump', false), 400);
+    case 'cmd': {
+      if (isOwner && action.cmd) bot.chat(action.cmd);
       break;
+    }
   }
 }
 
-// --- Lava & Fall Safe Anti-AFK Movement ---
-function startSafeAfkMovement(bot) {
+function stopFollowing(bot, msg) {
+  currentFollowTarget = null;
+  bot.pathfinder.stop();
+  bot.clearControlStates();
+  if (msg) bot.chat(msg);
+}
+
+function startSafeAfk(bot) {
   if (afkInterval) clearInterval(afkInterval);
-
   afkInterval = setInterval(() => {
-    // Agar bot already player ko follow kar raha hai to beech me disturb na kare
-    if (bot.pathfinder.isMoving()) return;
-
-    // Check kare ki niche lava ya khali jagah to nahi hai
-    const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-    if (!blockBelow || blockBelow.name === 'lava' || blockBelow.name === 'flowing_lava') {
-      bot.setControlState('jump', true);
-      return;
-    }
-
-    // Safe random direction movement (safe button tap)
-    const moves = ['forward', 'back', 'left', 'right', 'sneak'];
-    const randomMove = moves[Math.floor(Math.random() * moves.length)];
-    bot.setControlState(randomMove, true);
-
-    // Natural camera look
-    const yaw = Math.random() * Math.PI * 2;
-    const pitch = (Math.random() - 0.5) * 0.6;
-    bot.look(yaw, pitch, false);
-
+    if (bot.pathfinder.isMoving() || currentFollowTarget) return;
+    bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.4, false);
     if (Math.random() > 0.5) bot.swingArm('right');
-
-    setTimeout(() => {
-      bot.clearControlStates();
-    }, 500 + Math.random() * 800);
-
-  }, 9000 + Math.random() * 5000);
+  }, 10000);
 }
 
 startBot();
