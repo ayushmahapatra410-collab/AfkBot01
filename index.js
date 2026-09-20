@@ -2,7 +2,7 @@ const mineflayer = require('mineflayer');
 const express = require('express');
 const axios = require('axios');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalFollow, GoalXZ } = goals;
+const { GoalFollow } = goals;
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -15,8 +15,8 @@ const BOT_USERNAME = 'Cassie';
 const VERSION = '1.20.4';
 const DEFAULT_SKIN = 'chloepowell';
 
-// 2 Owners yahan set karein
-const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
+// Dono Owners yahan daal do
+const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const MODEL_NAME = 'openai/gpt-4o-mini';
@@ -54,13 +54,15 @@ function startBot() {
     const mcData = require('minecraft-data')(bot.version);
     const defaultMove = new Movements(bot, mcData);
 
-    // FIXED MOVEMENT RULES FOR SLABS, BLOCKS & WALLS
-    defaultMove.canDig = false;           // Raste ke blocks tod kar na nikle
-    defaultMove.allowParkour = true;      // 1-block ya slab jump naturally kare
-    defaultMove.allowSprinting = true;    // Sprint jump ke sath follow kare
-    defaultMove.canOpenDoors = true;      // Wall me agar door ho toh khol le
-    defaultMove.maxDropDown = 4;          // Safe drops handle kare
-    defaultMove.liquidCost = 30;          // Lava/water ko avoid kare
+    // Movements fix taaki slab par path drop na ho
+    defaultMove.canDig = false;           
+    defaultMove.allowParkour = true;      
+    defaultMove.allowSprinting = true;    
+    defaultMove.canOpenDoors = true;      
+    defaultMove.maxDropDown = 5;          
+    defaultMove.liquidCost = 25;
+    defaultMove.entityCost = 0; // Entity ko block na mane
+
     bot.pathfinder.setMovements(defaultMove);
 
     setTimeout(() => bot.chat(`/skin ${DEFAULT_SKIN}`), 3000);
@@ -74,10 +76,42 @@ function startBot() {
     setTimeout(() => bot.respawn(), 2000);
   });
 
-  // 1-Block / 1-Slab Auto-Jump Physics
+  // SLAB & MANUAL OVERRIDE ENGINE (Physics Tick)
   bot.on('physicsTick', () => {
-    if (bot.pathfinder.isMoving()) {
-      // Agar chalte waqt samne slab ya block se takraye to instant jump
+    if (!currentFollowTarget) return;
+
+    const target = bot.players[currentFollowTarget]?.entity;
+    if (!target) return;
+
+    const dist = bot.entity.position.distanceTo(target.position);
+
+    // Agar 2 blocks ke andar hai toh aaram se khadi rahe
+    if (dist <= 2.2) {
+      bot.clearControlStates();
+      return;
+    }
+
+    // DIRECT LINE OF SIGHT OVERRIDE
+    // Agar samne player dikh raha hai (chahe raste me slab ho), pathfinder ko dump karo aur seedha aage bado
+    if (bot.canSeeEntity(target)) {
+      // Direct look at player
+      bot.lookAt(target.position.offset(0, target.height * 0.85, 0), true);
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', dist > 4);
+
+      // Check karo ki aage slab/block par atki hai kya
+      const isStuckOrCollided = bot.entity.isCollidedHorizontally;
+      const blockInFront = bot.blockAtCursor(1.5);
+      const isSlabAhead = blockInFront && blockInFront.name.includes('slab');
+
+      // Agar samne slab hai ya body takra rahi hai toh direct jump do bina peeche ghoome
+      if (isStuckOrCollided || isSlabAhead) {
+        bot.setControlState('jump', true);
+      } else {
+        bot.setControlState('jump', false);
+      }
+    } else {
+      // Agar player samne nahi dikh raha (deewar ke peeche hai), tab auto jump on collision
       if (bot.entity.isCollidedHorizontally) {
         bot.setControlState('jump', true);
       } else {
@@ -86,17 +120,20 @@ function startBot() {
     }
   });
 
-  // Path na milne par ya unchi wall hone par bolna
+  // Pathfinder ko faltu rasta cancel karne se roko agar player visible hai
   bot.on('path_reset', (reason) => {
     if (currentFollowTarget && reason === 'noPath') {
-      bot.chat(`@${currentFollowTarget} Rasta hi nahi hai, kaise aau? Saamne wall hai!`);
-      currentFollowTarget = null;
-      bot.pathfinder.stop();
-      bot.clearControlStates();
+      const target = bot.players[currentFollowTarget]?.entity;
+      if (!target || !bot.canSeeEntity(target)) {
+        bot.chat(`@${currentFollowTarget} Rasta nahi mil raha, thoda aage aao!`);
+        currentFollowTarget = null;
+        bot.pathfinder.stop();
+      }
+      // Agar target visible hai to pathfinder ko ignore karega aur physicsTick seedha walk karwayega
     }
   });
 
-  // Self Defense (Owners ko chhod kar attacker par attack)
+  // Self Defense (Attackers par critical hits)
   bot.on('entityHurt', (entity) => {
     if (entity !== bot.entity) return;
     const attacker = bot.nearestEntity(e => 
@@ -121,13 +158,13 @@ function startBot() {
       return;
     }
 
-    // Owner Instant Stop
+    // Owner Stop Override
     if (isOwner(username) && (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop')) {
       stopAll(bot, 'Ruk gayi, sab cancel!');
       return;
     }
 
-    // Sirf '!' prefix par AI trigger
+    // Chat Prefix '!'
     if (!cleanMsg.startsWith('!')) return;
     const query = cleanMsg.substring(1).trim();
     if (!query) return;
@@ -193,32 +230,31 @@ async function handleCassieAI(bot, sender, userPrompt) {
   const senderIsOwner = isOwner(sender);
   const botPos = bot.entity.position;
 
-  // Real inventory list
   const invItems = bot.inventory.items().map(i => `${i.name} (x${i.count})`).join(', ') || 'Khali hai';
 
   const systemPrompt = `
-You are Cassie, a girl Minecraft gamer playing on an SMP.
-STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER say "aata hoon", "karta hoon", or "raha hoon".
+You are Cassie, a female Minecraft gamer playing on an SMP.
+STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon"[cite: 2].
 
-Current Status:
+Context:
 - Talking to: ${sender} (Owner: ${senderIsOwner})
-- Your Real Inventory: [${invItems}]
+- Real Inventory: [${invItems}]
 - Health: ${Math.round(bot.health)}/20
 - State: ${isExploring ? 'Exploring' : currentFollowTarget ? `Following ${currentFollowTarget}` : 'Idle'}
 
 Rules:
-1. NEVER offer items that are not in your inventory list. If you don't have a sword, don't mention dropping a sword.
-2. If sender says "pass aa", "follow", "mere paas aa", "jump karke aa", you MUST use the follow action. DO NOT use explore.
+1. Don't invent items. Only mention items physically in your Inventory[cite: 2].
+2. If asked to follow, come, or move close ("aaja", "pass aa", "follow", "chalo"), select follow. NEVER select explore[cite: 2].
 3. Only use explore if sender explicitly says "explore kar", "ghoom ke aa".
 4. Keep replies short, casual, and in cool girl Hinglish (under 60 chars).
 
 Action Tags (Add at the VERY END only if action needed):
-- Follow sender: [[ACTION: {"type": "follow", "target": "${sender}"}]]
-${senderIsOwner ? `- Follow someone else: [[ACTION: {"type": "follow", "target": "<player>"}]]` : ''}
-- Stop moving: [[ACTION: {"type": "stop"}]]
-- Explore/wander: [[ACTION: {"type": "explore"}]]
+- Follow: [[ACTION: {"type": "follow", "target": "${sender}"}]]
+${senderIsOwner ? `- Follow someone: [[ACTION: {"type": "follow", "target": "<player>"}]]` : ''}
+- Stop: [[ACTION: {"type": "stop"}]]
+- Explore: [[ACTION: {"type": "explore"}]]
 - Drop item: [[ACTION: {"type": "drop", "item": "<item_name_or_all>"}]]
-- Run server command: [[ACTION: {"type": "cmd", "cmd": "/command"}]]
+- Run cmd: [[ACTION: {"type": "cmd", "cmd": "/command"}]]
 `;
 
   chatMemory.push({ role: 'user', content: `${sender}: ${userPrompt}` });
@@ -272,7 +308,7 @@ async function executeAction(bot, sender, senderIsOwner, action) {
       const player = bot.players[targetName]?.entity;
       if (player) {
         currentFollowTarget = targetName;
-        bot.pathfinder.setGoal(new GoalFollow(player, 1.5), true);
+        bot.pathfinder.setGoal(new GoalFollow(player, 2.0), true);
       } else {
         bot.chat(`@${sender} tu render range se bahar hai, thoda paas aa!`);
       }
@@ -313,7 +349,7 @@ function runExploreCycle(bot) {
   const pos = bot.entity.position;
   const rx = pos.x + (Math.random() - 0.5) * 30;
   const rz = pos.z + (Math.random() - 0.5) * 30;
-  bot.pathfinder.setGoal(new GoalXZ(rx, rz));
+  bot.pathfinder.setGoal(new GoalFollow({ position: bot.entity.position.offset(rx - pos.x, 0, rz - pos.z) }, 1));
 
   setTimeout(() => {
     if (isExploring) runExploreCycle(bot);
