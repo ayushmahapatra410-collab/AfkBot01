@@ -20,7 +20,7 @@ const DEFAULT_SKIN = 'chloepowell';
 const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
-const MODEL_NAME = 'openai/gpt-4o-mini';
+const MODEL_NAME = 'openai/gpt-6-astra';
 
 let afkInterval = null;
 let currentFollowTarget = null;
