@@ -2,7 +2,7 @@ const mineflayer = require('mineflayer');
 const express = require('express');
 const axios = require('axios');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalFollow, GoalXZ } = goals;
+const { GoalXZ } = goals;
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -19,13 +19,14 @@ const DEFAULT_SKIN = 'chloepowell';
 const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
-const MODEL_NAME = 'openai/gpt-6-astra';
+const MODEL_NAME = 'z-ai/glm-5.2:free'; // Tera exact GLM 5.2 free model
 
 let afkInterval = null;
 let currentFollowTarget = null;
 let isExploring = false;
 let isReconnecting = false;
 let keyHoldTimeout = null;
+let jumpCooldown = false;
 
 // Memory Buffer
 let chatMemory = [];
@@ -75,6 +76,32 @@ function startBot() {
     startSafeAfk(bot);
   });
 
+  // --- AUTO GREET ON PLAYER JOIN ---
+  bot.on('playerJoined', (player) => {
+    if (!player || player.username === bot.username) return;
+
+    // 2.5 second delay taaki player properly render/load ho jaye
+    setTimeout(() => {
+      if (isOwner(player.username)) {
+        const ownerGreetings = [
+          `Arey @${player.username} aagaye! Welcome back owner ji!`,
+          `Welcome @${player.username}! Server ki raunak wapas aagayi!`,
+          `Hey @${player.username}! Kahan the itni der se? Mast timing pe aaye!`
+        ];
+        const greet = ownerGreetings[Math.floor(Math.random() * ownerGreetings.length)];
+        bot.chat(greet);
+      } else {
+        const memberGreetings = [
+          `Yo @${player.username}! Welcome to the server!`,
+          `Hey @${player.username}, welcome! Sab theek thak?`,
+          `Aaja @${player.username}, grind shuru karein!`
+        ];
+        const greet = memberGreetings[Math.floor(Math.random() * memberGreetings.length)];
+        bot.chat(greet);
+      }
+    }, 2500);
+  });
+
   bot.on('death', () => {
     logGameEvent('Mar gayi!');
     stopAll(bot);
@@ -83,24 +110,41 @@ function startBot() {
     }, 2000);
   });
 
-  // Physical Auto-Jump over Slabs & 1-Block heights
+  // --- 100% REAL HUMAN WASD + SLAB JUMP ENGINE ---
   bot.on('physicsTick', () => {
-    if (!currentFollowTarget && !isExploring) return;
-    if (bot.entity.isCollidedHorizontally) {
-      bot.setControlState('jump', true);
-    } else {
-      bot.setControlState('jump', false);
-    }
-  });
+    if (!currentFollowTarget) return;
 
-  bot.on('path_reset', (reason) => {
-    if (currentFollowTarget && reason === 'noPath') {
-      const target = bot.players[currentFollowTarget]?.entity;
-      if (!target) {
-        bot.chat(`@${currentFollowTarget} Rasta nahi mil raha, paas aao!`);
-        currentFollowTarget = null;
-        bot.pathfinder.stop();
-      }
+    const target = bot.players[currentFollowTarget]?.entity;
+    if (!target) return;
+
+    const dist = bot.entity.position.distanceTo(target.position);
+
+    // Agar 2 blocks ke andar hai toh shanti se khadi rahe
+    if (dist <= 2.2) {
+      bot.clearControlStates();
+      return;
+    }
+
+    // Direct line of sight: target ke face ki taraf dekhe
+    bot.lookAt(target.position.offset(0, target.height * 0.85, 0), true);
+
+    // Continuous smooth forward walk
+    bot.setControlState('forward', true);
+    bot.setControlState('sprint', dist > 4.5);
+
+    // Real spacebar jump tap for slabs and blocks
+    const isCollided = bot.entity.isCollidedHorizontally;
+    const blockAhead = bot.blockAtCursor(1.6);
+    const hasObstacle = blockAhead && (blockAhead.name.includes('slab') || blockAhead.name.includes('stair') || blockAhead.boundingBox === 'block');
+
+    if ((isCollided || hasObstacle) && !jumpCooldown) {
+      jumpCooldown = true;
+      bot.setControlState('jump', true);
+
+      setTimeout(() => {
+        bot.setControlState('jump', false);
+        jumpCooldown = false;
+      }, 300);
     }
   });
 
@@ -114,12 +158,12 @@ function startBot() {
     if (attacker) proAttack(bot, attacker);
   });
 
-  // Chat Router with Multi-Key & Mouse & AI Support
+  // Chat Router
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
 
-    // Owner Console Command
+    // Owner Console Command (!cmd <command>)
     if (cleanMsg.startsWith('!cmd ')) {
       if (!isOwner(username)) {
         bot.chat(`@${username} Sirf owner console commands chala sakte hain!`);
@@ -129,7 +173,7 @@ function startBot() {
       return;
     }
 
-    // Stop Everything Override
+    // Stop Everything
     if (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop') {
       stopAll(bot, 'Ruk gayi, sab cancel!');
       return;
@@ -141,12 +185,12 @@ function startBot() {
 
     // --- MULTI-KEY COMBOS (W + Space, Sprint Jump, etc.) ---
     if (query === 'w+space' || query === 'w space' || query.includes('jump walk') || query === 'kud ke aage aa') {
-      triggerComboKeys(bot, ['forward', 'jump'], 1200);
+      triggerComboKeys(bot, ['forward', 'jump'], 1400);
       bot.chat('W + Space daba rahi hu!');
       return;
     }
     if (query === 'sprint jump' || query === 'w+space+sprint' || query === 'bhaag ke kudo') {
-      triggerComboKeys(bot, ['forward', 'jump', 'sprint'], 1200);
+      triggerComboKeys(bot, ['forward', 'jump', 'sprint'], 1400);
       bot.chat('Sprint jump maar rahi hu!');
       return;
     }
@@ -160,18 +204,8 @@ function startBot() {
       bot.chat('W + A pressed!');
       return;
     }
-    if (query === 's+d' || query === 's d') {
-      triggerComboKeys(bot, ['back', 'right'], 1000);
-      bot.chat('S + D pressed!');
-      return;
-    }
-    if (query === 's+a' || query === 's a') {
-      triggerComboKeys(bot, ['back', 'left'], 1000);
-      bot.chat('S + A pressed!');
-      return;
-    }
 
-    // --- SINGLE KEYBOARD INPUTS (WASD / JUMP / SNEAK) ---
+    // --- SINGLE KEYS (WASD / JUMP / SNEAK) ---
     if (['w', 'aage', 'forward'].includes(query)) {
       triggerComboKeys(bot, ['forward'], 1200);
       bot.chat('W pressed!');
@@ -193,7 +227,7 @@ function startBot() {
       return;
     }
     if (['space', 'jump', 'kudo'].includes(query)) {
-      triggerComboKeys(bot, ['jump'], 400);
+      triggerComboKeys(bot, ['jump'], 500);
       bot.chat('Jumped!');
       return;
     }
@@ -204,7 +238,7 @@ function startBot() {
       return;
     }
 
-    // --- MOUSE CAMERA CONTROLS ---
+    // --- MOUSE CAMERA LOOK ---
     if (query.includes('upar dekh') || query === 'look up') {
       bot.look(bot.entity.yaw, Math.PI / 3, true);
       bot.chat('Upar dekh rahi hu!');
@@ -242,13 +276,13 @@ function startBot() {
       return;
     }
 
-    // --- INSTANT FOLLOW SHORTCUT ---
+    // --- ZERO-LAG INSTANT FOLLOW SHORTCUT ---
     if (query.includes('pass aa') || query.includes('follow') || query.includes('aaja') || query.includes('mere pass')) {
       isExploring = false;
+      bot.pathfinder.stop(); // Buggy pathfinder band
       const player = bot.players[username]?.entity;
       if (player) {
         currentFollowTarget = username;
-        bot.pathfinder.setGoal(new GoalFollow(player, 2.2), true);
         bot.chat(`Aa rahi hu @${username}!`);
       } else {
         bot.chat(`@${username} Tu render range me nahi hai, thoda samne aa!`);
@@ -256,7 +290,7 @@ function startBot() {
       return;
     }
 
-    // Normal OpenRouter AI Chat
+    // AI Chat via GLM 5.2 Free
     try {
       await handleCassieAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
@@ -267,7 +301,7 @@ function startBot() {
 
   // Auto Mob Combat Loop
   setInterval(() => {
-    if (bot.pathfinder.isMoving() && !isExploring) return;
+    if (currentFollowTarget || isExploring) return;
     const dangerMob = bot.nearestEntity(e => 
       ['creeper', 'zombie', 'skeleton', 'spider'].includes(e.name) &&
       bot.entity.position.distanceTo(e.position) < 4.5
@@ -302,15 +336,20 @@ function startBot() {
 
 // --- Multi-Key Simulator ---
 function triggerComboKeys(bot, controls = [], durationMs = 1200) {
-  stopAll(bot);
-  controls.forEach(ctrl => bot.setControlState(ctrl, true));
+  bot.pathfinder.stop();
+  currentFollowTarget = null;
+  isExploring = false;
+
   if (keyHoldTimeout) clearTimeout(keyHoldTimeout);
+  controls.forEach(ctrl => bot.setControlState(ctrl, true));
+
   keyHoldTimeout = setTimeout(() => {
     controls.forEach(ctrl => bot.setControlState(ctrl, false));
+    bot.clearControlStates();
   }, durationMs);
 }
 
-// --- Inventory Detail Reporter ---
+// --- Inventory Reporter ---
 function reportInventory(bot, sender) {
   const items = bot.inventory.items();
   if (items.length === 0) {
@@ -321,7 +360,7 @@ function reportInventory(bot, sender) {
   bot.chat(`@${sender} Mere paas: ${summary.length > 170 ? summary.substring(0, 165) + '...' : summary}`);
 }
 
-// --- Critical Hit Combat ---
+// --- Combat ---
 async function proAttack(bot, target) {
   if (isOwner(target.username)) return;
 
@@ -338,7 +377,7 @@ async function proAttack(bot, target) {
   }, 220);
 }
 
-// --- AI Brain ---
+// --- AI Brain (GLM 5.2 Free) ---
 async function handleCassieAI(bot, sender, userPrompt) {
   if (!OPENROUTER_API_KEY) {
     bot.chat(`@${sender} OPENROUTER_API_KEY set nahi hai!`);
@@ -386,9 +425,11 @@ ${senderIsOwner ? `- Follow someone: [[ACTION: {"type": "follow", "target": "<pl
     {
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://railway.app',
+        'X-Title': 'Cassie Minecraft Bot'
       },
-      timeout: 8000
+      timeout: 9000
     }
   );
 
@@ -428,7 +469,6 @@ async function executeAction(bot, sender, senderIsOwner, action) {
       const player = bot.players[targetName]?.entity;
       if (player) {
         currentFollowTarget = targetName;
-        bot.pathfinder.setGoal(new GoalFollow(player, 2.2), true);
       } else {
         bot.chat(`@${sender} tu render range se bahar hai, thoda paas aa!`);
       }
@@ -517,7 +557,7 @@ function startSafeAfk(bot) {
   }, 9000);
 }
 
-// Process Crash Shield
+// Global Crash Shield
 process.on('uncaughtException', (err) => console.error('[Uncaught Exception]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('[Unhandled Rejection]:', reason));
 
