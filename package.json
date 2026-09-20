@@ -1,11 +1,16 @@
 {
   "name": "aternos-bot",
+  "version": "1.0.0",
+  "description": "Smart AI Minecraft Bot for Aternos",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "axios": "^1.7.7",
+    "express": "^4.19.2",
+    "minecraft-data": "^3.57.0",
     "mineflayer": "^4.22.0",
-    "express": "^4.19.2"
+    "mineflayer-pathfinder": "^2.4.5"
   }
 }
