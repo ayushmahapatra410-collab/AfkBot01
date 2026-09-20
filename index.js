@@ -15,7 +15,7 @@ const BOT_USERNAME = 'Cassie';
 const VERSION = '1.20.4';
 const DEFAULT_SKIN = 'chloepowell';
 
-// Dono Owners yahan daal do
+// Dono Owners
 const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
@@ -25,6 +25,7 @@ let afkInterval = null;
 let currentFollowTarget = null;
 let isExploring = false;
 let isReconnecting = false;
+let keyHoldTimeout = null;
 
 // Memory Buffer
 let chatMemory = [];
@@ -57,14 +58,13 @@ function startBot() {
       const mcData = require('minecraft-data')(bot.version);
       const defaultMove = new Movements(bot, mcData);
 
-      // Stable movement settings
       defaultMove.canDig = false;           
       defaultMove.allowParkour = true;      
       defaultMove.allowSprinting = true;    
       defaultMove.canOpenDoors = true;      
       defaultMove.maxDropDown = 4;          
       defaultMove.liquidCost = 25;
-      defaultMove.entityCost = 0; // Player hitbox collision bypass[cite: 3]
+      defaultMove.entityCost = 0;
 
       bot.pathfinder.setMovements(defaultMove);
     } catch (e) {
@@ -83,11 +83,9 @@ function startBot() {
     }, 2000);
   });
 
-  // SLAB & STEP AUTO JUMP (Sirf obstruction par tap karega, direct forward fight nahi karega)
+  // Physical Auto-Jump over Slabs & 1-Block heights
   bot.on('physicsTick', () => {
     if (!currentFollowTarget && !isExploring) return;
-
-    // Agar pathfinder chal raha hai aur samne slab ya 1 block aa gaya to jump tap kare
     if (bot.entity.isCollidedHorizontally) {
       bot.setControlState('jump', true);
     } else {
@@ -95,7 +93,6 @@ function startBot() {
     }
   });
 
-  // Pathfinder stuck hone par safe recover
   bot.on('path_reset', (reason) => {
     if (currentFollowTarget && reason === 'noPath') {
       const target = bot.players[currentFollowTarget]?.entity;
@@ -107,7 +104,7 @@ function startBot() {
     }
   });
 
-  // Self Defense (Attackers par critical hits)
+  // Self Defense
   bot.on('entityHurt', (entity) => {
     if (entity !== bot.entity) return;
     const attacker = bot.nearestEntity(e => 
@@ -117,12 +114,12 @@ function startBot() {
     if (attacker) proAttack(bot, attacker);
   });
 
-  // Chat Router
+  // Chat Router with Multi-Key & Mouse & AI Support
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
 
-    // Owner Console Command (!cmd <command>)
+    // Owner Console Command
     if (cleanMsg.startsWith('!cmd ')) {
       if (!isOwner(username)) {
         bot.chat(`@${username} Sirf owner console commands chala sakte hain!`);
@@ -132,20 +129,120 @@ function startBot() {
       return;
     }
 
-    // Owner Stop Override
+    // Stop Everything Override
     if (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop') {
-      if (isOwner(username) || currentFollowTarget === username) {
-        stopAll(bot, 'Ruk gayi, sab cancel!');
-      }
+      stopAll(bot, 'Ruk gayi, sab cancel!');
       return;
     }
 
-    // Chat Prefix '!'
     if (!cleanMsg.startsWith('!')) return;
     const query = cleanMsg.substring(1).trim().toLowerCase();
     if (!query) return;
 
-    // INSTANT FOLLOW SHORTCUT (AI ka wait kiye bina direct execution taaki lag se disconnect na ho)
+    // --- MULTI-KEY COMBOS (W + Space, Sprint Jump, etc.) ---
+    if (query === 'w+space' || query === 'w space' || query.includes('jump walk') || query === 'kud ke aage aa') {
+      triggerComboKeys(bot, ['forward', 'jump'], 1200);
+      bot.chat('W + Space daba rahi hu!');
+      return;
+    }
+    if (query === 'sprint jump' || query === 'w+space+sprint' || query === 'bhaag ke kudo') {
+      triggerComboKeys(bot, ['forward', 'jump', 'sprint'], 1200);
+      bot.chat('Sprint jump maar rahi hu!');
+      return;
+    }
+    if (query === 'w+d' || query === 'w d') {
+      triggerComboKeys(bot, ['forward', 'right'], 1000);
+      bot.chat('W + D pressed!');
+      return;
+    }
+    if (query === 'w+a' || query === 'w a') {
+      triggerComboKeys(bot, ['forward', 'left'], 1000);
+      bot.chat('W + A pressed!');
+      return;
+    }
+    if (query === 's+d' || query === 's d') {
+      triggerComboKeys(bot, ['back', 'right'], 1000);
+      bot.chat('S + D pressed!');
+      return;
+    }
+    if (query === 's+a' || query === 's a') {
+      triggerComboKeys(bot, ['back', 'left'], 1000);
+      bot.chat('S + A pressed!');
+      return;
+    }
+
+    // --- SINGLE KEYBOARD INPUTS (WASD / JUMP / SNEAK) ---
+    if (['w', 'aage', 'forward'].includes(query)) {
+      triggerComboKeys(bot, ['forward'], 1200);
+      bot.chat('W pressed!');
+      return;
+    }
+    if (['s', 'peeche', 'back', 'backward'].includes(query)) {
+      triggerComboKeys(bot, ['back'], 1200);
+      bot.chat('S pressed!');
+      return;
+    }
+    if (['a', 'left'].includes(query)) {
+      triggerComboKeys(bot, ['left'], 1200);
+      bot.chat('A pressed!');
+      return;
+    }
+    if (['d', 'right'].includes(query)) {
+      triggerComboKeys(bot, ['right'], 1200);
+      bot.chat('D pressed!');
+      return;
+    }
+    if (['space', 'jump', 'kudo'].includes(query)) {
+      triggerComboKeys(bot, ['jump'], 400);
+      bot.chat('Jumped!');
+      return;
+    }
+    if (['crouch', 'sneak', 'shift'].includes(query)) {
+      const isSneaking = bot.getControlState('sneak');
+      bot.setControlState('sneak', !isSneaking);
+      bot.chat(!isSneaking ? 'Sneak on!' : 'Sneak off!');
+      return;
+    }
+
+    // --- MOUSE CAMERA CONTROLS ---
+    if (query.includes('upar dekh') || query === 'look up') {
+      bot.look(bot.entity.yaw, Math.PI / 3, true);
+      bot.chat('Upar dekh rahi hu!');
+      return;
+    }
+    if (query.includes('niche dekh') || query === 'look down') {
+      bot.look(bot.entity.yaw, -Math.PI / 3, true);
+      bot.chat('Niche dekh rahi hu!');
+      return;
+    }
+    if (query.includes('left dekh') || query === 'look left') {
+      bot.look(bot.entity.yaw + Math.PI / 2, bot.entity.pitch, true);
+      bot.chat('Left ghumaya!');
+      return;
+    }
+    if (query.includes('right dekh') || query === 'look right') {
+      bot.look(bot.entity.yaw - Math.PI / 2, bot.entity.pitch, true);
+      bot.chat('Right ghumaya!');
+      return;
+    }
+    if (query.includes('meri taraf dekh') || query.includes('look at me')) {
+      const player = bot.players[username]?.entity;
+      if (player) {
+        bot.lookAt(player.position.offset(0, player.height * 0.85, 0), true);
+        bot.chat(`@${username} dekh rahi hu!`);
+      } else {
+        bot.chat(`@${username} tu dikh nahi raha!`);
+      }
+      return;
+    }
+
+    // --- INVENTORY SCANNER ---
+    if (query.includes('kya hai') || query === 'inv' || query === 'inventory' || query.includes('items')) {
+      reportInventory(bot, username);
+      return;
+    }
+
+    // --- INSTANT FOLLOW SHORTCUT ---
     if (query.includes('pass aa') || query.includes('follow') || query.includes('aaja') || query.includes('mere pass')) {
       isExploring = false;
       const player = bot.players[username]?.entity;
@@ -159,6 +256,7 @@ function startBot() {
       return;
     }
 
+    // Normal OpenRouter AI Chat
     try {
       await handleCassieAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
@@ -202,6 +300,27 @@ function startBot() {
   bot.on('error', (e) => console.error('[Bot Error]:', e.message));
 }
 
+// --- Multi-Key Simulator ---
+function triggerComboKeys(bot, controls = [], durationMs = 1200) {
+  stopAll(bot);
+  controls.forEach(ctrl => bot.setControlState(ctrl, true));
+  if (keyHoldTimeout) clearTimeout(keyHoldTimeout);
+  keyHoldTimeout = setTimeout(() => {
+    controls.forEach(ctrl => bot.setControlState(ctrl, false));
+  }, durationMs);
+}
+
+// --- Inventory Detail Reporter ---
+function reportInventory(bot, sender) {
+  const items = bot.inventory.items();
+  if (items.length === 0) {
+    bot.chat(`@${sender} Mera bag ekdam khali hai!`);
+    return;
+  }
+  const summary = items.map(i => `${i.displayName || i.name} x${i.count}`).join(', ');
+  bot.chat(`@${sender} Mere paas: ${summary.length > 170 ? summary.substring(0, 165) + '...' : summary}`);
+}
+
 // --- Critical Hit Combat ---
 async function proAttack(bot, target) {
   if (isOwner(target.username)) return;
@@ -231,7 +350,7 @@ async function handleCassieAI(bot, sender, userPrompt) {
 
   const systemPrompt = `
 You are Cassie, a female Minecraft gamer playing on an SMP.
-STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon"[cite: 2].
+STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon".
 
 Context:
 - Talking to: ${sender} (Owner: ${senderIsOwner})
@@ -240,10 +359,9 @@ Context:
 - State: ${isExploring ? 'Exploring' : currentFollowTarget ? `Following ${currentFollowTarget}` : 'Idle'}
 
 Rules:
-1. Don't invent items. Only mention items physically in your Inventory[cite: 2].
-2. If asked to follow, come, or move close, use the follow action[cite: 2].
-3. Only use explore if sender explicitly says "explore kar", "ghoom ke aa".
-4. Keep replies short, casual, and in cool girl Hinglish (under 60 chars).
+1. When asked about inventory, look at Real Inventory and state accurately.
+2. If asked to follow, move, or explore, trigger actions appropriately.
+3. Keep replies short, casual, and in cool girl Hinglish (under 60 chars).
 
 Action Tags (Add at the VERY END only if action needed):
 - Follow: [[ACTION: {"type": "follow", "target": "${sender}"}]]
@@ -332,9 +450,7 @@ async function executeAction(bot, sender, senderIsOwner, action) {
     }
 
     case 'stop': {
-      if (senderIsOwner || currentFollowTarget === sender) {
-        stopAll(bot, 'Ruk gayi!');
-      }
+      stopAll(bot, 'Ruk gayi!');
       break;
     }
 
@@ -345,14 +461,13 @@ async function executeAction(bot, sender, senderIsOwner, action) {
   }
 }
 
-// --- Explore Cycle (GoalXZ used to prevent crash) ---
+// --- Explore Cycle ---
 function runExploreCycle(bot) {
   if (!isExploring) return;
   const pos = bot.entity.position;
   const rx = pos.x + (Math.random() - 0.5) * 20;
   const rz = pos.z + (Math.random() - 0.5) * 20;
 
-  // Real GoalXZ (no fake entity object)
   bot.pathfinder.setGoal(new GoalXZ(rx, rz));
 
   setTimeout(() => {
@@ -387,6 +502,7 @@ async function dropItems(bot, matchName) {
 function stopAll(bot, msg) {
   currentFollowTarget = null;
   isExploring = false;
+  if (keyHoldTimeout) clearTimeout(keyHoldTimeout);
   bot.pathfinder.stop();
   bot.clearControlStates();
   if (msg) bot.chat(msg);
@@ -401,7 +517,7 @@ function startSafeAfk(bot) {
   }, 9000);
 }
 
-// Global Crash Handlers taaki process band na ho
+// Process Crash Shield
 process.on('uncaughtException', (err) => console.error('[Uncaught Exception]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('[Unhandled Rejection]:', reason));
 
