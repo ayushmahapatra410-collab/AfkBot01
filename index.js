@@ -1,13 +1,13 @@
 const mineflayer = require('mineflayer');
 const express = require('express');
-const { GoogleGenAI } = require('@google/genai');
+const axios = require('axios');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalFollow } = goals;
 
-// --- Web Server (24/7 Hosting) ---
+// --- Web Server (Keep Alive) ---
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Cassie is Online with Gemini!'));
+app.get('/', (req, res) => res.send('Cassie is Online with GPT-4o-mini!'));
 app.listen(port, () => console.log(`[Web] Listening on port ${port}`));
 
 // --- Configurations ---
@@ -19,8 +19,8 @@ const DEFAULT_SKIN = 'chloepowell';
 // Dono Owners
 const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
 
-// Google AI Studio Client
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const MODEL_NAME = 'openai/gpt-4o-mini';
 
 let afkInterval = null;
 let currentFollowTarget = null;
@@ -92,7 +92,6 @@ function startBot() {
       return;
     }
 
-    // Direct collision jump over slabs and small blocks
     if (bot.entity.isCollidedHorizontally) {
       bot.setControlState('jump', true);
     } else {
@@ -141,12 +140,12 @@ function startBot() {
       return;
     }
 
-    // Direct Gemini AI Studio Call
+    // OpenRouter AI Call
     try {
-      await handleCassieGemini(bot, username, cleanMsg.substring(1).trim());
+      await handleCassieAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
-      console.error('[Gemini API Error]:', err.message);
-      bot.chat(`@${username} Mera dimag thoda lag ho gaya, dobara bolna!`);
+      console.error('[OpenRouter Error]:', err.response?.data || err.message);
+      bot.chat(`@${username} Dimag thoda lag ho gaya, wapas bol!`);
     }
   });
 
@@ -169,19 +168,19 @@ function startBot() {
   bot.on('error', (e) => console.error('[Bot Error]:', e.message));
 }
 
-// --- Gemini AI Brain ---
-async function handleCassieGemini(bot, sender, userPrompt) {
-  if (!process.env.GEMINI_API_KEY) {
-    bot.chat(`@${sender} GEMINI_API_KEY set nahi hai Railway me!`);
+// --- AI Brain (OpenRouter GPT-4o-mini) ---
+async function handleCassieAI(bot, sender, userPrompt) {
+  if (!OPENROUTER_API_KEY) {
+    bot.chat(`@${sender} OPENROUTER_API_KEY set nahi hai!`);
     return;
   }
 
   const senderIsOwner = isOwner(sender);
   const invItems = bot.inventory.items().map(i => `${i.name} (x${i.count})`).join(', ') || 'Khali';
 
-  const systemInstruction = `
-You are Cassie, a friendly female human gamer on a Minecraft SMP.
-STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use masculine forms like "aata hoon" or "karta hoon"[cite: 2].
+  const systemPrompt = `
+You are Cassie, a friendly female human gamer playing on a Minecraft SMP.
+STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon" or "karta hoon"[cite: 2].
 Current Status:
 - Talking to: ${sender} (Owner: ${senderIsOwner})
 - Your Real Inventory: [${invItems}]
@@ -189,25 +188,29 @@ Current Status:
 Keep responses strictly under 60 characters in cool girl Hinglish.
 `;
 
-  // Memory buffer maintain
-  chatMemory.push({ role: 'user', parts: [{ text: `${sender}: ${userPrompt}` }] });
+  chatMemory.push({ role: 'user', content: `${sender}: ${userPrompt}` });
   if (chatMemory.length > 6) chatMemory.shift();
 
-  // Gemini 2.5 Flash call via @google/genai
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: chatMemory,
-    config: {
-      systemInstruction: systemInstruction,
-      maxOutputTokens: 70,
-      temperature: 0.7
+  const response = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
+      model: MODEL_NAME,
+      messages: [{ role: 'system', content: systemPrompt }, ...chatMemory],
+      max_tokens: 70,
+      temperature: 0.6
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 8000
     }
-  });
+  );
 
-  const replyText = response.text ? response.text.trim() : '';
-
+  const replyText = response.data?.choices?.[0]?.message?.content?.trim();
   if (replyText) {
-    chatMemory.push({ role: 'model', parts: [{ text: replyText }] });
+    chatMemory.push({ role: 'assistant', content: replyText });
     const cleanOutput = replyText.length > 200 ? replyText.substring(0, 197) + '...' : replyText;
     bot.chat(cleanOutput);
   }
@@ -230,7 +233,7 @@ function startSafeAfk(bot) {
   }, 9000);
 }
 
-// Process Crash Shield
+// Global Process Crash Shield
 process.on('uncaughtException', (err) => console.error('[Uncaught Exception]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('[Unhandled Rejection]:', reason));
 
