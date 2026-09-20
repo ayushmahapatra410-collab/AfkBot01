@@ -2,29 +2,45 @@ const mineflayer = require('mineflayer');
 const express = require('express');
 const axios = require('axios');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalFollow } = goals;
+const { GoalFollow, GoalNear, GoalXZ } = goals;
 
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Cassie is Online!'));
-app.listen(port, () => console.log(`Listening on port ${port}`));
+app.get('/', (req, res) => res.send('Cassie Pro Player is Online!'));
+app.listen(port, () => console.log(`Web server running on port ${port}`));
 
-// --- Config ---
+// --- Configurations ---
 const SERVER_IP = 'YSsmpontop.aternos.me';
 const BOT_USERNAME = 'Cassie';
 const VERSION = '1.20.4';
 const DEFAULT_SKIN = 'chloepowell';
-const OWNER_USERNAME = 'NotGamerSpark'; // Screenshot ke according tera IGN set kar diya
+
+// 2 Owners set karein yahan
+const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
+
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const MODEL_NAME = 'openai/gpt-4o-mini';
 
 let afkInterval = null;
 let currentFollowTarget = null;
-// Memory buffer (Last 6 messages yaad rakhegi)
+let isExploring = false;
+let isSafeMode = true; // Safe play flag
+
+// Game and Conversation Long-Term Memory Buffer
 let chatMemory = [];
+let gameEventsLog = [];
+
+function logGameEvent(event) {
+  gameEventsLog.push(`[${new Date().toLocaleTimeString()}] ${event}`);
+  if (gameEventsLog.length > 10) gameEventsLog.shift();
+}
+
+function isOwner(username) {
+  return username && OWNERS.includes(username.toLowerCase());
+}
 
 function startBot() {
-  console.log(`Connecting Cassie to ${SERVER_IP}...`);
+  console.log(`Connecting Cassie Pro to ${SERVER_IP}...`);
 
   const bot = mineflayer.createBot({
     host: SERVER_IP,
@@ -35,23 +51,44 @@ function startBot() {
   bot.loadPlugin(pathfinder);
 
   bot.on('spawn', () => {
-    console.log(`✅ ${bot.username} spawned!`);
+    console.log(`✅ ${bot.username} spawned like a Pro!`);
     const mcData = require('minecraft-data')(bot.version);
     const defaultMove = new Movements(bot, mcData);
-    defaultMove.canDig = true; // Mining allow ki
-    defaultMove.allow1by1towers = false;
+
+    // PRO MOVEMENT: Todne ke bajaye climb & jump kare
+    defaultMove.canDig = false;          // Raste ke blocks bilkul nahi todegi
+    defaultMove.allowParkour = true;     // 1-2 block parkour & jump over slabs
+    defaultMove.allowSprinting = true;   // Sprint karegi insaan ki tarah
     defaultMove.maxDropDown = 4;
-    defaultMove.allowParkour = true;
+    defaultMove.liquidCost = 25;
     bot.pathfinder.setMovements(defaultMove);
 
     setTimeout(() => bot.chat(`/skin ${DEFAULT_SKIN}`), 3000);
+    logGameEvent('Server me join hui aur setup complete kiya');
     startSafeAfk(bot);
   });
 
   bot.on('death', () => {
-    console.log('💀 Respawning...');
+    logGameEvent('Mar gayi aur respawn ho rahi hai');
     currentFollowTarget = null;
+    isExploring = false;
     setTimeout(() => bot.respawn(), 2000);
+  });
+
+  // Self Defense & PVP (Attacked hone par)
+  bot.on('entityHurt', (entity) => {
+    if (entity !== bot.entity) return;
+
+    // Aas paas attacker dhundo
+    const attacker = bot.nearestEntity(e => 
+      (e.type === 'mob' || (e.type === 'player' && !isOwner(e.username))) &&
+      bot.entity.position.distanceTo(e.position) < 6
+    );
+
+    if (attacker) {
+      logGameEvent(`${attacker.name || attacker.username} ne damage diya! Counter attack shuru.`);
+      proAttack(bot, attacker);
+    }
   });
 
   // Chat Router
@@ -59,23 +96,23 @@ function startBot() {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
 
-    // Owner direct command
+    // Owner Direct Command Execution (!cmd <cmd>)
     if (cleanMsg.startsWith('!cmd ')) {
-      if (username !== OWNER_USERNAME) {
-        bot.chat(`@${username} Sirf owner (${OWNER_USERNAME}) commands chala sakte hain!`);
+      if (!isOwner(username)) {
+        bot.chat(`@${username} Sirf owners command chala sakte hain!`);
         return;
       }
       bot.chat(cleanMsg.replace('!cmd ', '').trim());
       return;
     }
 
-    // Owner stop shortcut
-    if (username === OWNER_USERNAME && (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop')) {
-      stopFollowing(bot, 'Ruk gayi!');
+    // Owner Stop Override
+    if (isOwner(username) && (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop')) {
+      stopAll(bot, 'Ruk gayi, sab cancel!');
       return;
     }
 
-    // Chat prefix rule
+    // Only respond with '!' prefix
     if (!cleanMsg.startsWith('!')) return;
     const query = cleanMsg.substring(1).trim();
     if (!query) return;
@@ -84,84 +121,110 @@ function startBot() {
       await handleCassieAI(bot, username, query);
     } catch (err) {
       console.error('AI Error:', err.message);
-      bot.chat(`@${username} Dimag thoda lag ho gaya, wapas bolna!`);
+      bot.chat(`@${username} Lag ho gayi thodi, dobara bol!`);
     }
   });
 
-  // Mobs check
+  // Auto Combat & Defense Loop
   setInterval(() => {
-    if (bot.pathfinder.isMoving()) return;
-    const mob = bot.nearestEntity(e => 
-      ['creeper', 'zombie', 'skeleton'].includes(e.name) &&
+    if (bot.pathfinder.isMoving() && !isExploring) return;
+
+    // 4 block ke andar dangerous mob check karein
+    const dangerMob = bot.nearestEntity(e => 
+      ['creeper', 'zombie', 'skeleton', 'spider'].includes(e.name) &&
       bot.entity.position.distanceTo(e.position) < 5
     );
-    if (mob) {
-      if (mob.name === 'creeper') {
-        const away = bot.entity.position.minus(mob.position).normalize();
+
+    if (dangerMob) {
+      if (dangerMob.name === 'creeper') {
+        // Creeper se sprint back
+        const away = bot.entity.position.minus(dangerMob.position).normalize();
         bot.lookAt(bot.entity.position.plus(away));
         bot.setControlState('sprint', true);
         bot.setControlState('forward', true);
-        setTimeout(() => bot.clearControlStates(), 1200);
+        setTimeout(() => bot.clearControlStates(), 1000);
       } else {
-        bot.attack(mob);
+        proAttack(bot, dangerMob);
       }
     }
-  }, 2000);
+  }, 1200);
 
   bot.on('end', () => {
-    console.log('Disconnected. Reconnecting in 25s...');
+    console.log('Disconnected. Reconnecting...');
     if (afkInterval) clearInterval(afkInterval);
     currentFollowTarget = null;
+    isExploring = false;
     setTimeout(startBot, 25000);
   });
 
   bot.on('error', (e) => console.error(e.message));
 }
 
-// --- AI Brain with Memory & Actions ---
+// --- Pro Combat Execution (Sword Equip + Crit Hit) ---
+async function proAttack(bot, target) {
+  if (isOwner(target.username)) return; // Owner par attack bilkul nahi
+
+  // Best sword ya axe hath me pakadna
+  const weapon = bot.inventory.items().find(i => i.name.includes('sword') || i.name.includes('axe'));
+  if (weapon) {
+    try { await bot.equip(weapon, 'hand'); } catch (e) {}
+  }
+
+  bot.lookAt(target.position.offset(0, target.height * 0.8, 0));
+
+  // Critical hit: Jump karke niche aate waqt attack
+  bot.setControlState('jump', true);
+  setTimeout(() => {
+    bot.setControlState('jump', false);
+    bot.attack(target);
+  }, 250);
+}
+
+// --- AI Brain with Full Memory & Smart Decision ---
 async function handleCassieAI(bot, sender, userPrompt) {
-  const isOwner = sender === OWNER_USERNAME;
+  const senderIsOwner = isOwner(sender);
   const botPos = bot.entity.position;
 
-  // Samne kaun sa block hai check karna
-  const targetBlock = bot.blockAtCursor(4);
-  const blockInFrontName = targetBlock ? targetBlock.name : 'air';
+  // Inventory list text
+  const invItems = bot.inventory.items().map(i => `${i.name} (x${i.count})`).join(', ') || 'Khali hai';
 
   const systemPrompt = `
-You are Cassie, an active human-like female Minecraft player on an SMP.
-NEVER talk like a robotic assistant. Do NOT say "Help karne ko ready hoon" or "dhyan do". Talk like a real gamer girl friend in casual Hinglish.
-Keep responses under 60 characters.
+You are Cassie, a pro human Minecraft player on an SMP.
+You play smartly like an actual gamer with full consciousness. Never act like a robotic AI assistant.
+Speak in cool, friendly, casual gamer Hinglish. Max 75 characters per response.
 
-Status:
-- Talking to: ${sender} (Owner: ${isOwner})
-- Block right in front/crosshair: "${blockInFrontName}"
-- Health: ${Math.round(bot.health)}/20
-- Currently Following: ${currentFollowTarget || 'None'}
+Game Context & Memory:
+- Sender: ${sender} (Is Owner: ${senderIsOwner})
+- Your Pos: X=${Math.round(botPos.x)}, Y=${Math.round(botPos.y)}, Z=${Math.round(botPos.z)}
+- Health: ${Math.round(bot.health)}/20 | Food: ${Math.round(bot.food)}/20
+- Inventory: [${invItems}]
+- Recent Events: ${gameEventsLog.slice(-3).join(' | ')}
+- Mode: ${isExploring ? 'Exploring' : currentFollowTarget ? `Following ${currentFollowTarget}` : 'Idle'}
 
-Actions (Append JSON tag at the VERY END if action is asked):
-- Follow sender: [[ACTION: {"type": "follow", "target": "${sender}"}]]
-${isOwner ? `- Follow another player: [[ACTION: {"type": "follow", "target": "<player>"}]]` : ''}
-- Stop moving: [[ACTION: {"type": "stop"}]]
-- Mine block in front: [[ACTION: {"type": "mine"}]]
-- Run server command: [[ACTION: {"type": "cmd", "cmd": "/command"}]]
+Action Commands (Add JSON tag at the VERY END only if an action is needed):
+- Follow someone: [[ACTION: {"type": "follow", "target": "${sender}"}]]
+${senderIsOwner ? `- Follow specific player: [[ACTION: {"type": "follow", "target": "<player>"}]]` : ''}
+- Stop everything: [[ACTION: {"type": "stop"}]]
+- Explore autonomously: [[ACTION: {"type": "explore"}]]
+- Drop item: [[ACTION: {"type": "drop", "item": "<item_name_or_all>"}]]
+- Toggle safe mode: [[ACTION: {"type": "safe_mode", "value": true}]]
+- Run command: [[ACTION: {"type": "cmd", "cmd": "/command"}]]
+
+If sender says "drop sword", action is {"type": "drop", "item": "sword"}.
+If asked to explore, action is {"type": "explore"}.
 `;
 
-  // Memory maintain (Last 6 messages)
+  // Memory buffer maintain
   chatMemory.push({ role: 'user', content: `${sender}: ${userPrompt}` });
-  if (chatMemory.length > 6) chatMemory.shift();
-
-  const messagesPayload = [
-    { role: 'system', content: systemPrompt },
-    ...chatMemory
-  ];
+  if (chatMemory.length > 8) chatMemory.shift();
 
   const response = await axios.post(
     'https://openrouter.ai/api/v1/chat/completions',
     {
       model: MODEL_NAME,
-      messages: messagesPayload,
-      max_tokens: 100,
-      temperature: 0.6
+      messages: [{ role: 'system', content: systemPrompt }, ...chatMemory],
+      max_tokens: 120,
+      temperature: 0.65
     },
     {
       headers: {
@@ -175,7 +238,6 @@ ${isOwner ? `- Follow another player: [[ACTION: {"type": "follow", "target": "<p
   const actionMatch = rawReply.match(/\[\[ACTION:\s*(\{.*?\})\]\]/);
   let chatText = rawReply.replace(/\[\[ACTION:\s*(\{.*?\})\]\]/, '').trim();
 
-  // Assistant response ko bhi memory me save karo
   chatMemory.push({ role: 'assistant', content: chatText });
 
   if (chatText) {
@@ -186,61 +248,107 @@ ${isOwner ? `- Follow another player: [[ACTION: {"type": "follow", "target": "<p
   if (actionMatch) {
     try {
       const action = JSON.parse(actionMatch[1]);
-      executeAction(bot, sender, isOwner, action);
+      executeAction(bot, sender, senderIsOwner, action);
     } catch (e) {
-      console.error('Parse err:', e);
+      console.error('Action parse error:', e);
     }
   }
 }
 
-// --- Action Handler ---
-async function executeAction(bot, sender, isOwner, action) {
+// --- Action Execution ---
+async function executeAction(bot, sender, senderIsOwner, action) {
   switch (action.type) {
     case 'follow': {
+      isExploring = false;
       let targetName = action.target || sender;
-      if (!isOwner && targetName.toLowerCase() !== sender.toLowerCase()) targetName = sender;
+      if (!senderIsOwner && targetName.toLowerCase() !== sender.toLowerCase()) targetName = sender;
 
       const player = bot.players[targetName]?.entity;
       if (player) {
         currentFollowTarget = targetName;
         bot.pathfinder.setGoal(new GoalFollow(player, 2), true);
+        logGameEvent(`${targetName} ko follow karna shuru kiya`);
       } else {
         bot.chat(`@${sender} tu render range ke bahar hai, paas aa!`);
       }
       break;
     }
 
-    case 'mine': {
-      const block = bot.blockAtCursor(4);
-      if (block && block.name !== 'air' && block.name !== 'bedrock') {
-        try {
-          await bot.dig(block);
-          bot.chat(`Tod diya ${block.name}!`);
-        } catch (err) {
-          bot.chat(`Block toot nahi paya: ${err.message}`);
-        }
-      } else {
-        bot.chat(`Samne koi todne layak block nahi hai!`);
-      }
+    case 'explore': {
+      currentFollowTarget = null;
+      isExploring = true;
+      bot.chat('Theek hai, main thoda explore karke aati hu!');
+      logGameEvent('Autonomous explore mode shuru kiya');
+      runExploreCycle(bot);
+      break;
+    }
+
+    case 'drop': {
+      const itemToDrop = action.item ? action.item.toLowerCase() : 'all';
+      dropItemsFromInventory(bot, itemToDrop);
+      break;
+    }
+
+    case 'safe_mode': {
+      isSafeMode = Boolean(action.value);
+      bot.chat(isSafeMode ? 'Ab se ekdam safe play karungi!' : 'Aggressive mode on!');
       break;
     }
 
     case 'stop': {
-      if (isOwner || currentFollowTarget === sender) {
-        stopFollowing(bot, 'Ruk gayi!');
+      if (senderIsOwner || currentFollowTarget === sender) {
+        stopAll(bot, 'Ruk gayi!');
       }
       break;
     }
 
     case 'cmd': {
-      if (isOwner && action.cmd) bot.chat(action.cmd);
+      if (senderIsOwner && action.cmd) bot.chat(action.cmd);
       break;
     }
   }
 }
 
-function stopFollowing(bot, msg) {
+// --- Explore Cycle (Insan ki tarah ghume) ---
+function runExploreCycle(bot) {
+  if (!isExploring) return;
+
+  const currentPos = bot.entity.position;
+  // 15-25 blocks door random point
+  const rx = currentPos.x + (Math.random() - 0.5) * 35;
+  const rz = currentPos.z + (Math.random() - 0.5) * 35;
+
+  bot.pathfinder.setGoal(new GoalXZ(rx, rz));
+
+  // Agar 12 sec me na pahuche toh agla target
+  setTimeout(() => {
+    if (isExploring) runExploreCycle(bot);
+  }, 12000);
+}
+
+// --- Drop Items Function ---
+async function dropItemsFromInventory(bot, matchName) {
+  const items = bot.inventory.items();
+  if (items.length === 0) {
+    bot.chat('Mera inventory khali hai!');
+    return;
+  }
+
+  for (const item of items) {
+    if (matchName === 'all' || matchName === 'everything' || item.name.toLowerCase().includes(matchName)) {
+      try {
+        await bot.tossStack(item);
+      } catch (err) {
+        console.error('Drop error:', err);
+      }
+    }
+  }
+  bot.chat('Le phek diya!');
+}
+
+function stopAll(bot, msg) {
   currentFollowTarget = null;
+  isExploring = false;
   bot.pathfinder.stop();
   bot.clearControlStates();
   if (msg) bot.chat(msg);
@@ -249,10 +357,10 @@ function stopFollowing(bot, msg) {
 function startSafeAfk(bot) {
   if (afkInterval) clearInterval(afkInterval);
   afkInterval = setInterval(() => {
-    if (bot.pathfinder.isMoving() || currentFollowTarget) return;
+    if (bot.pathfinder.isMoving() || currentFollowTarget || isExploring) return;
     bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.4, false);
     if (Math.random() > 0.5) bot.swingArm('right');
-  }, 10000);
+  }, 8000);
 }
 
 startBot();
