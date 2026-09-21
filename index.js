@@ -1,14 +1,14 @@
 const mineflayer = require('mineflayer');
 const express = require('express');
+const axios = require('axios');
 const { Vec3 } = require('vec3');
-const { GoogleGenAI } = require('@google/genai');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalFollow, GoalNear, GoalXZ, GoalBlock } = goals;
 
 // --- Web Server (Keep-Alive Shield) ---
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Cassie is Online with Gemini 3.6 Flash!'));
+app.get('/', (req, res) => res.send('Cassie is Online with GPT-4o-mini via OpenRouter!'));
 app.listen(port, () => console.log(`[Web] Listening on port ${port}`));
 
 // --- Server Configurations ---
@@ -24,15 +24,10 @@ let spawnAnchor = null;
 // Owners List
 const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
 
-// Google AI Studio API Key & Model Configuration
-const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-const MODEL_NAME = 'gemini-3.6-flash';
-
-// Initialize Google GenAI SDK
-let ai = null;
-if (GEMINI_API_KEY) {
-  ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-}
+// OpenRouter Configuration
+const rawApiKey = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY || '';
+const OPENROUTER_API_KEY = rawApiKey.trim();
+const MODEL_NAME = 'openai/gpt-4o-mini';
 
 // State Machine
 let afkInterval = null;
@@ -57,7 +52,7 @@ const FOOD_NAMES = [
 // Hazard Blocks (Campfire, Lava, Fire, Magma)
 const HAZARDS = ['campfire', 'soul_campfire', 'fire', 'soul_fire', 'lava', 'magma_block', 'sweet_berry_bush'];
 
-// Chat Memory Buffer
+// Chat Buffer
 let chatMemory = [];
 
 function isOwner(username) {
@@ -76,7 +71,7 @@ function startBot() {
 
   bot.loadPlugin(pathfinder);
 
-  // 1. Spawn Event & Movements Setup
+  // 1. Spawn Event & Physics Init
   bot.on('spawn', () => {
     console.log(`✅ ${bot.username} spawned into the world!`);
     spawnAnchor = bot.entity.position.clone();
@@ -110,9 +105,9 @@ function startBot() {
     }, 2000);
   });
 
-  // 3. Human Physics, Hazard Avoidance & 12-Chunk Edge Protection
+  // 3. Human Physics, Hazard Avoidance & 12-Chunk Boundary Guard
   bot.on('physicsTick', () => {
-    // 12-Chunk Boundary Guard
+    // 12-Chunk Boundary Limit
     if (spawnAnchor) {
       const distFromCenter = bot.entity.position.distanceTo(spawnAnchor);
       if (distFromCenter > MAX_SIMULATION_RADIUS) {
@@ -127,7 +122,7 @@ function startBot() {
       }
     }
 
-    // Hazard Guard (Campfire, Lava, Fire)
+    // Hazard Avoidance (Campfire, Lava, Fire)
     const blockUnder = bot.blockAt(bot.entity.position);
     const blockDirectBelow = bot.blockAt(bot.entity.position.offset(0, -0.5, 0));
     const isHazard = (blockUnder && HAZARDS.includes(blockUnder.name)) ||
@@ -486,12 +481,13 @@ function startBot() {
       return;
     }
 
-    // --- Google AI Studio (Official GenAI SDK) Brain ---
+    // --- OpenRouter GPT-4o-mini Brain ---
     try {
-      await handleCassieGoogleAI(bot, username, cleanMsg.substring(1).trim());
+      await handleCassieAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
-      console.error('Google GenAI Error:', err.message);
-      bot.chat(`@${username} Dimag lag ho gaya: ${err.message.substring(0, 45)}`);
+      const errorMsg = err.response?.data?.error?.message || err.message;
+      console.error('OpenRouter AI Error:', errorMsg);
+      bot.chat(`@${username} Dimag lag ho gaya: ${errorMsg.substring(0, 45)}`);
     }
   });
 
@@ -851,17 +847,17 @@ function runExploreCycle(bot) {
   }, 12000);
 }
 
-// --- Google AI Studio (Official GenAI SDK) Implementation ---
-async function handleCassieGoogleAI(bot, sender, userPrompt) {
-  if (!ai) {
-    bot.chat(`@${sender} GEMINI_API_KEY environment variable set nahi hai!`);
+// --- OpenRouter GPT-4o-mini Brain ---
+async function handleCassieAI(bot, sender, userPrompt) {
+  if (!OPENROUTER_API_KEY) {
+    bot.chat(`@${sender} OPENROUTER_API_KEY environment variable set nahi hai!`);
     return;
   }
 
   const senderIsOwner = isOwner(sender);
   const invItems = bot.inventory.items().map(i => `${i.name} (x${i.count})`).join(', ') || 'Khali hai';
 
-  const systemInstruction = `
+  const systemPrompt = `
 You are Cassie, a friendly and pro female gamer playing as a real autonomous player on a Minecraft SMP.
 STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon"[cite: 2].
 
@@ -889,57 +885,46 @@ Action Tags (Add at the VERY END only if action needed):
 - Eat: [[ACTION: {"type": "eat"}]]
 `;
 
-  chatMemory.push({ role: 'user', parts: [{ text: `${sender}: ${userPrompt}` }] });
+  chatMemory.push({ role: 'user', content: `${sender}: ${userPrompt}` });
   if (chatMemory.length > 8) chatMemory.shift();
 
-  try {
-    const response = await ai.models.generateContent({
+  const response = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
       model: MODEL_NAME,
-      contents: chatMemory,
-      config: {
-        systemInstruction: systemInstruction,
-        maxOutputTokens: 100,
-        temperature: 0.6
-      }
-    });
-
-    // Dual Text Extractor Fallback
-    let rawReply = '';
-    if (response && response.text) {
-      rawReply = response.text.trim();
-    } else if (response && response.candidates && response.candidates[0]?.content?.parts?.[0]?.text) {
-      rawReply = response.candidates[0].content.parts[0].text.trim();
+      messages: [{ role: 'system', content: systemPrompt }, ...chatMemory],
+      max_tokens: 80,
+      temperature: 0.6
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://railway.app',
+        'X-Title': 'Cassie Minecraft Bot'
+      },
+      timeout: 8000
     }
+  );
 
-    if (!rawReply) {
-      bot.chat(`@${sender} Haan sun rahi hu, bolo!`);
-      return;
+  const rawReply = response.data.choices[0].message.content.trim();
+  const actionMatch = rawReply.match(/\[\[ACTION:\s*(\{.*?\})\]\]/);
+  let chatText = rawReply.replace(/\[\[ACTION:\s*(\{.*?\})\]\]/, '').trim();
+
+  chatMemory.push({ role: 'assistant', content: chatText });
+
+  if (chatText) {
+    if (chatText.length > 200) chatText = chatText.substring(0, 197) + '...';
+    bot.chat(cleanChat(chatText));
+  }
+
+  if (actionMatch) {
+    try {
+      const action = JSON.parse(actionMatch[1]);
+      executeAction(bot, sender, senderIsOwner, action);
+    } catch (e) {
+      console.error('Action parse error:', e);
     }
-
-    const actionMatch = rawReply.match(/\[\[ACTION:\s*(\{.*?\})\]\]/);
-    let chatText = rawReply.replace(/\[\[ACTION:\s*(\{.*?\})\]\]/, '').trim();
-
-    chatMemory.push({ role: 'model', parts: [{ text: chatText || rawReply }] });
-
-    if (chatText) {
-      if (chatText.length > 195) chatText = chatText.substring(0, 192) + '...';
-      bot.chat(cleanChat(chatText));
-    } else {
-      bot.chat(`@${sender} Done!`);
-    }
-
-    if (actionMatch) {
-      try {
-        const action = JSON.parse(actionMatch[1]);
-        executeAction(bot, sender, senderIsOwner, action);
-      } catch (e) {
-        console.error('Action parse error:', e);
-      }
-    }
-  } catch (err) {
-    const errText = err.message || JSON.stringify(err);
-    console.error('GenAI Runtime Error:', errText);
-    bot.chat(`@${sender} Error: ${errText.substring(0, 45)}`);
   }
 }
 
