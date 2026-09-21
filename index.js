@@ -22,10 +22,10 @@ const MAX_SIMULATION_RADIUS = 192;
 let spawnAnchor = null;
 
 // Owners List
-const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
+const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
 
 // AI Model via OpenRouter
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY || '';
+const OPENROUTER_API_KEY = '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';
 const MODEL_NAME = 'google/gemma-4-26b-a4b-it';
 
 // State Machine
