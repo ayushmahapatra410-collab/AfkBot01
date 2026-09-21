@@ -8,7 +8,7 @@ const { GoalFollow, GoalNear, GoalXZ, GoalBlock } = goals;
 // --- Web Server (Keep-Alive Shield) ---
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Cassie is Online with Google AI Studio (GenAI)!'));
+app.get('/', (req, res) => res.send('Cassie is Online with Gemini 3.6 Flash!'));
 app.listen(port, () => console.log(`[Web] Listening on port ${port}`));
 
 // --- Server Configurations ---
@@ -24,9 +24,9 @@ let spawnAnchor = null;
 // Owners List
 const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
 
-// Google AI Studio API Key
+// Google AI Studio API Key & Model Configuration
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-const MODEL_NAME = 'gemini-3.8-flash';
+const MODEL_NAME = 'gemini-3.6-flash';
 
 // Initialize Google GenAI SDK
 let ai = null;
@@ -57,7 +57,7 @@ const FOOD_NAMES = [
 // Hazard Blocks (Campfire, Lava, Fire, Magma)
 const HAZARDS = ['campfire', 'soul_campfire', 'fire', 'soul_fire', 'lava', 'magma_block', 'sweet_berry_bush'];
 
-// Chat Buffer
+// Chat Memory Buffer
 let chatMemory = [];
 
 function isOwner(username) {
@@ -76,7 +76,7 @@ function startBot() {
 
   bot.loadPlugin(pathfinder);
 
-  // 1. Spawn Event
+  // 1. Spawn Event & Movements Setup
   bot.on('spawn', () => {
     console.log(`✅ ${bot.username} spawned into the world!`);
     spawnAnchor = bot.entity.position.clone();
@@ -127,7 +127,7 @@ function startBot() {
       }
     }
 
-    // Hazard Avoidance (Campfire, Lava, Fire)
+    // Hazard Guard (Campfire, Lava, Fire)
     const blockUnder = bot.blockAt(bot.entity.position);
     const blockDirectBelow = bot.blockAt(bot.entity.position.offset(0, -0.5, 0));
     const isHazard = (blockUnder && HAZARDS.includes(blockUnder.name)) ||
@@ -177,7 +177,7 @@ function startBot() {
     }
   });
 
-  // 4. Survival: 50% Health Warning & Food Engine
+  // 4. Survival: 50% Health Warning & Food Consumption
   bot.on('health', async () => {
     if (isEating || isSleeping) return;
     const now = Date.now();
@@ -246,7 +246,7 @@ function startBot() {
     if (attacker) proAttack(bot, attacker);
   });
 
-  // 7. Chat Router & Parser
+  // 7. Main Chat Router & Parser
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
@@ -261,7 +261,7 @@ function startBot() {
       return;
     }
 
-    // Stop Override
+    // Stop Everything Override
     if (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop' || cleanMsg.toLowerCase() === '!ruk' || cleanMsg.toLowerCase() === '!rukja') {
       stopAll(bot, 'Ruk gayi, sab cancel!');
       return;
@@ -338,7 +338,7 @@ function startBot() {
       return;
     }
 
-    // --- CAMERA LOOK ---
+    // --- MOUSE CAMERA CONTROLS ---
     if (query.includes('upar dekh') || query === 'look up') {
       bot.look(bot.entity.yaw, Math.PI / 3, true);
       bot.chat('Upar dekh rahi hu!');
@@ -486,7 +486,7 @@ function startBot() {
       return;
     }
 
-    // --- Google AI Studio (GenAI SDK) Brain ---
+    // --- Google AI Studio (Official GenAI SDK) Brain ---
     try {
       await handleCassieGoogleAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
@@ -495,7 +495,7 @@ function startBot() {
     }
   });
 
-  // Combat loop
+  // Combat loop for nearby creepers
   setInterval(() => {
     if (currentFollowTarget || isExploring || isWorking || isEating || isSleeping) return;
     const dangerMob = bot.nearestEntity(e => 
@@ -530,7 +530,7 @@ function startBot() {
   bot.on('error', (e) => console.error('[Bot Error]:', e.message));
 }
 
-// Multi-Key Simulator
+// --- Multi-Key Simulator ---
 function triggerComboKeys(bot, controls = [], durationMs = 1200) {
   bot.pathfinder.stop();
   currentFollowTarget = null;
@@ -545,7 +545,7 @@ function triggerComboKeys(bot, controls = [], durationMs = 1200) {
   }, durationMs);
 }
 
-// Exact Count Mining Engine
+// --- Exact Count Mining Engine ---
 async function mineSpecificBlocks(bot, rawName, count) {
   if (isWorking) return;
   isWorking = true;
@@ -594,7 +594,7 @@ async function mineSpecificBlocks(bot, rawName, count) {
   isWorking = false;
 }
 
-// Tree Chopper & Replant
+// --- Tree Chopper & Replant ---
 async function chopNearestTrees(bot) {
   if (isWorking) return;
   isWorking = true;
@@ -648,7 +648,7 @@ async function chopNearestTrees(bot) {
   bot.chat('Ped kat gaye!');
 }
 
-// Torches Breaker
+// --- Torches Breaker ---
 async function breakAllTorchesAround(bot) {
   if (isWorking) return;
   isWorking = true;
@@ -684,7 +684,7 @@ async function breakAllTorchesAround(bot) {
   isWorking = false;
 }
 
-// Food Engine
+// --- Food Engine ---
 async function consumeFood(bot, foodItem) {
   if (isEating) return;
   isEating = true;
@@ -716,7 +716,7 @@ async function forceEatFood(bot) {
   }
 }
 
-// Go to Bed
+// --- Go to Bed ---
 async function goToBed(bot) {
   const bed = bot.findBlock({
     matching: (b) => b && b.name.includes('bed'),
@@ -739,7 +739,7 @@ async function goToBed(bot) {
   }
 }
 
-// Torch Placement
+// --- Torch Placement ---
 async function placeTorchOnGround(bot) {
   const torch = bot.inventory.items().find(i => i.name.includes('torch'));
   if (!torch) {
@@ -760,7 +760,7 @@ async function placeTorchOnGround(bot) {
   }
 }
 
-// Vision
+// --- Vision Reporter ---
 function reportVision(bot, sender) {
   const block = bot.blockAtCursor(5);
   const targetEntity = bot.nearestEntity(e => e.type !== 'object' && e !== bot.entity && bot.entity.position.distanceTo(e.position) < 6);
@@ -776,7 +776,7 @@ function reportVision(bot, sender) {
   }
 }
 
-// Inventory
+// --- Inventory Details ---
 function reportInventory(bot, sender) {
   const items = bot.inventory.items();
   if (items.length === 0) {
@@ -787,7 +787,7 @@ function reportInventory(bot, sender) {
   bot.chat(`@${sender} Mere paas: ${summary.length > 170 ? summary.substring(0, 165) + '...' : summary}`);
 }
 
-// Drop Items
+// --- Drop Items Stack by Stack ---
 async function dropItems(bot, matchName) {
   const items = bot.inventory.items();
   if (items.length === 0) {
@@ -815,7 +815,7 @@ async function dropItems(bot, matchName) {
   bot.chat('Ye lo, sab drop kar diya!');
 }
 
-// Pro Attack
+// --- Critical Combat Attack ---
 async function proAttack(bot, target) {
   if (isOwner(target.username)) return;
 
@@ -832,7 +832,7 @@ async function proAttack(bot, target) {
   }, 220);
 }
 
-// Explore
+// --- Explore Cycle with 12-Chunk Edge Guard ---
 function runExploreCycle(bot) {
   if (!isExploring) return;
   const pos = bot.entity.position;
@@ -854,7 +854,7 @@ function runExploreCycle(bot) {
 // --- Google AI Studio (Official GenAI SDK) Implementation ---
 async function handleCassieGoogleAI(bot, sender, userPrompt) {
   if (!ai) {
-    bot.chat(`@${sender} GEMINI_API_KEY set nahi hai!`);
+    bot.chat(`@${sender} GEMINI_API_KEY environment variable set nahi hai!`);
     return;
   }
 
@@ -892,35 +892,54 @@ Action Tags (Add at the VERY END only if action needed):
   chatMemory.push({ role: 'user', parts: [{ text: `${sender}: ${userPrompt}` }] });
   if (chatMemory.length > 8) chatMemory.shift();
 
-  // Call official Google GenAI SDK
-  const response = await ai.models.generateContent({
-    model: MODEL_NAME,
-    contents: chatMemory,
-    config: {
-      systemInstruction: systemInstruction,
-      maxOutputTokens: 80,
-      temperature: 0.6
+  try {
+    const response = await ai.models.generateContent({
+      model: MODEL_NAME,
+      contents: chatMemory,
+      config: {
+        systemInstruction: systemInstruction,
+        maxOutputTokens: 100,
+        temperature: 0.6
+      }
+    });
+
+    // Dual Text Extractor Fallback
+    let rawReply = '';
+    if (response && response.text) {
+      rawReply = response.text.trim();
+    } else if (response && response.candidates && response.candidates[0]?.content?.parts?.[0]?.text) {
+      rawReply = response.candidates[0].content.parts[0].text.trim();
     }
-  });
 
-  const rawReply = (response.text || '').trim();
-  const actionMatch = rawReply.match(/\[\[ACTION:\s*(\{.*?\})\]\]/);
-  let chatText = rawReply.replace(/\[\[ACTION:\s*(\{.*?\})\]\]/, '').trim();
-
-  chatMemory.push({ role: 'model', parts: [{ text: chatText }] });
-
-  if (chatText) {
-    if (chatText.length > 200) chatText = chatText.substring(0, 197) + '...';
-    bot.chat(cleanChat(chatText));
-  }
-
-  if (actionMatch) {
-    try {
-      const action = JSON.parse(actionMatch[1]);
-      executeAction(bot, sender, senderIsOwner, action);
-    } catch (e) {
-      console.error('Action parse error:', e);
+    if (!rawReply) {
+      bot.chat(`@${sender} Haan sun rahi hu, bolo!`);
+      return;
     }
+
+    const actionMatch = rawReply.match(/\[\[ACTION:\s*(\{.*?\})\]\]/);
+    let chatText = rawReply.replace(/\[\[ACTION:\s*(\{.*?\})\]\]/, '').trim();
+
+    chatMemory.push({ role: 'model', parts: [{ text: chatText || rawReply }] });
+
+    if (chatText) {
+      if (chatText.length > 195) chatText = chatText.substring(0, 192) + '...';
+      bot.chat(cleanChat(chatText));
+    } else {
+      bot.chat(`@${sender} Done!`);
+    }
+
+    if (actionMatch) {
+      try {
+        const action = JSON.parse(actionMatch[1]);
+        executeAction(bot, sender, senderIsOwner, action);
+      } catch (e) {
+        console.error('Action parse error:', e);
+      }
+    }
+  } catch (err) {
+    const errText = err.message || JSON.stringify(err);
+    console.error('GenAI Runtime Error:', errText);
+    bot.chat(`@${sender} Error: ${errText.substring(0, 45)}`);
   }
 }
 
