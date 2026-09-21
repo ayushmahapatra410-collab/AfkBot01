@@ -28,9 +28,20 @@ let afkInterval = null;
 let currentFollowTarget = null;
 let isExploring = false;
 let isWorking = false;
+let isEating = false;
 let isReconnecting = false;
 let keyHoldTimeout = null;
 let jumpCooldown = false;
+let lastFoodAskTime = 0;
+
+// Food items list
+const FOOD_NAMES = [
+  'cooked_beef', 'steak', 'cooked_porkchop', 'cooked_mutton', 'cooked_chicken',
+  'golden_carrot', 'bread', 'baked_potato', 'apple', 'cooked_salmon', 'cooked_cod', 'carrot'
+];
+
+// Dangerous blocks to avoid
+const HAZARDS = ['campfire', 'soul_campfire', 'fire', 'soul_fire', 'lava', 'magma_block', 'sweet_berry_bush'];
 
 // Memory Buffer
 let chatMemory = [];
@@ -94,9 +105,26 @@ function startBot() {
     }, 2000);
   });
 
-  // Real-Player Slab & Obstacle Auto-Jump
+  // --- Real-Player Slab Jump + Hazard Avoidance (Campfire/Lava) ---
   bot.on('physicsTick', () => {
-    if (!currentFollowTarget) return;
+    // 1. HAZARD DETECTION (Campfire / Fire / Magma se turant bhago)
+    const blockUnder = bot.blockAt(bot.entity.position);
+    const blockDirectBelow = bot.blockAt(bot.entity.position.offset(0, -0.5, 0));
+
+    const isStandingOnHazard = (blockUnder && HAZARDS.includes(blockUnder.name)) ||
+                               (blockDirectBelow && HAZARDS.includes(blockDirectBelow.name));
+
+    if (isStandingOnHazard) {
+      bot.setControlState('jump', true);
+      bot.setControlState('back', true);
+      setTimeout(() => {
+        bot.setControlState('jump', false);
+        bot.setControlState('back', false);
+      }, 400);
+      return;
+    }
+
+    if (!currentFollowTarget || isEating || isWorking) return;
 
     const target = bot.players[currentFollowTarget]?.entity;
     if (!target) return;
@@ -111,6 +139,7 @@ function startBot() {
     bot.setControlState('forward', true);
     bot.setControlState('sprint', dist > 4.5);
 
+    // Slab & obstacle jump
     const isCollided = bot.entity.isCollidedHorizontally;
     const blockAhead = bot.blockAtCursor(1.6);
     const hasObstacle = blockAhead && (blockAhead.name.includes('slab') || blockAhead.name.includes('stair') || blockAhead.boundingBox === 'block');
@@ -125,7 +154,28 @@ function startBot() {
     }
   });
 
-  // Self Defense
+  // --- Auto Hunger / Health Food Routine ---
+  bot.on('health', async () => {
+    if (isEating) return;
+
+    // Check if food needed
+    if (bot.food < 16 || (bot.health < 17 && bot.food < 20)) {
+      const foodItem = bot.inventory.items().find(i => FOOD_NAMES.includes(i.name));
+
+      if (foodItem) {
+        await consumeFood(bot, foodItem);
+      } else {
+        // Khana nahi hai to chat me maango (cooldown 20 seconds)
+        const now = Date.now();
+        if (now - lastFoodAskTime > 20000) {
+          lastFoodAskTime = now;
+          bot.chat('Mujhe bhookh lag rahi hai aur health kam ho rahi hai, thoda khana do na please!');
+        }
+      }
+    }
+  });
+
+  // Self Defense with Critical Hits
   bot.on('entityHurt', (entity) => {
     if (entity !== bot.entity) return;
     const attacker = bot.nearestEntity(e => 
@@ -246,12 +296,20 @@ function startBot() {
       chopNearestTrees(bot);
       return;
     }
+    if (query.includes('torch tod') || query.includes('break torch') || query.includes('torches break')) {
+      breakAllTorchesAround(bot);
+      return;
+    }
     if (query.includes('torch laga') || query.includes('light up') || query.includes('torch')) {
       placeTorchOnGround(bot);
       return;
     }
     if (query.includes('block tod') || query.includes('break block') || query.includes('dig')) {
       breakBlockInFront(bot);
+      return;
+    }
+    if (query.includes('khana khao') || query.includes('eat')) {
+      forceEatFood(bot);
       return;
     }
 
@@ -267,7 +325,7 @@ function startBot() {
 
   // Combat loop
   setInterval(() => {
-    if (currentFollowTarget || isExploring || isWorking) return;
+    if (currentFollowTarget || isExploring || isWorking || isEating) return;
     const dangerMob = bot.nearestEntity(e => 
       ['creeper', 'zombie', 'skeleton', 'spider'].includes(e.name) &&
       bot.entity.position.distanceTo(e.position) < 4.5
@@ -315,6 +373,75 @@ function triggerComboKeys(bot, controls = [], durationMs = 1200) {
   }, durationMs);
 }
 
+// --- Food Consume Engine ---
+async function consumeFood(bot, foodItem) {
+  if (isEating) return;
+  isEating = true;
+
+  const currentWeapon = bot.inventory.items().find(i => i.name.includes('sword') || i.name.includes('axe'));
+
+  try {
+    bot.chat('Ruko, thoda khana kha leti hu!');
+    await bot.equip(foodItem, 'hand');
+    await bot.consume();
+    bot.chat('Mast khana tha! Pet bhar gaya.');
+
+    // Khane ke baad wapas weapon hotbar me equip kare
+    if (currentWeapon) {
+      await bot.equip(currentWeapon, 'hand');
+    }
+  } catch (e) {
+    console.error('Eat error:', e.message);
+  } finally {
+    isEating = false;
+  }
+}
+
+async function forceEatFood(bot) {
+  const foodItem = bot.inventory.items().find(i => FOOD_NAMES.includes(i.name));
+  if (foodItem) {
+    await consumeFood(bot, foodItem);
+  } else {
+    bot.chat('Mere paas koi khane ka item nahi hai!');
+  }
+}
+
+// --- Break ALL Torches Nearby (Dhoondh ke todna) ---
+async function breakAllTorchesAround(bot) {
+  if (isWorking) return;
+  isWorking = true;
+
+  const torchPositions = bot.findBlocks({
+    matching: (b) => b && b.name && (b.name.includes('torch')),
+    maxDistance: 12,
+    count: 20
+  });
+
+  if (!torchPositions || torchPositions.length === 0) {
+    bot.chat('Aas-paas koi torch nahi mili todne ke liye!');
+    isWorking = false;
+    return;
+  }
+
+  bot.chat(`${torchPositions.length} torches mili hain, sab tod rahi hu!`);
+
+  for (const pos of torchPositions) {
+    const block = bot.blockAt(pos);
+    if (!block || !block.name.includes('torch')) continue;
+
+    try {
+      await bot.lookAt(pos, true);
+      await bot.dig(block);
+      await bot.waitForTicks(4);
+    } catch (err) {
+      continue;
+    }
+  }
+
+  bot.chat('Saari torches tod di!');
+  isWorking = false;
+}
+
 // Vision
 function reportVision(bot, sender) {
   const block = bot.blockAtCursor(5);
@@ -331,7 +458,7 @@ function reportVision(bot, sender) {
   }
 }
 
-// Torch
+// Torch Placement
 async function placeTorchOnGround(bot) {
   const torch = bot.inventory.items().find(i => i.name.includes('torch'));
   if (!torch) {
@@ -352,7 +479,7 @@ async function placeTorchOnGround(bot) {
   }
 }
 
-// Break block
+// Break block in front
 async function breakBlockInFront(bot) {
   const targetBlock = bot.blockAtCursor(4);
   if (!targetBlock || targetBlock.name === 'air' || targetBlock.name === 'bedrock') {
@@ -372,7 +499,7 @@ async function breakBlockInFront(bot) {
   }
 }
 
-// Chop Trees & Replant Sapling
+// Chop Trees & Replant
 async function chopNearestTrees(bot) {
   if (isWorking) return;
   isWorking = true;
@@ -465,7 +592,7 @@ async function dropItems(bot, matchName) {
   bot.chat('Ye lo, sab drop kar diya!');
 }
 
-// Combat Attack
+// Combat Critical Attack
 async function proAttack(bot, target) {
   if (isOwner(target.username)) return;
 
@@ -494,16 +621,17 @@ async function handleCassieAI(bot, sender, userPrompt) {
 
   const systemPrompt = `
 You are Cassie, a friendly and pro female gamer playing as a companion on a Minecraft SMP.
-STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon"[cite: 2].
+STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon".
 
 Context:
 - Talking to: ${sender} (Owner: ${senderIsOwner})
 - Real Inventory: [${invItems}]
 - Health: ${Math.round(bot.health)}/20
+- Food: ${Math.round(bot.food)}/20
 
 Rules:
 1. When asked about inventory, look at Real Inventory and state accurately.
-2. If asked to follow, move, chop trees, place torch, or drop items, output appropriate ACTION.
+2. If asked to follow, move, chop trees, break torches, place torch, eat food, or drop items, output appropriate ACTION.
 3. Keep replies short, casual, and in cool girl Hinglish (under 60 chars).
 
 Action Tags (Add at the VERY END only if action needed):
@@ -512,7 +640,9 @@ Action Tags (Add at the VERY END only if action needed):
 - Drop: [[ACTION: {"type": "drop", "item": "<item_name_or_all>"}]]
 - Chop: [[ACTION: {"type": "chop"}]]
 - Torch: [[ACTION: {"type": "torch"}]]
+- BreakTorch: [[ACTION: {"type": "break_torches"}]]
 - Break: [[ACTION: {"type": "break"}]]
+- Eat: [[ACTION: {"type": "eat"}]]
 `;
 
   chatMemory.push({ role: 'user', content: `${sender}: ${userPrompt}` });
@@ -580,8 +710,16 @@ async function executeAction(bot, sender, senderIsOwner, action) {
       placeTorchOnGround(bot);
       break;
     }
+    case 'break_torches': {
+      breakAllTorchesAround(bot);
+      break;
+    }
     case 'break': {
       breakBlockInFront(bot);
+      break;
+    }
+    case 'eat': {
+      forceEatFood(bot);
       break;
     }
     case 'drop': {
@@ -599,6 +737,7 @@ function stopAll(bot, msg) {
   currentFollowTarget = null;
   isExploring = false;
   isWorking = false;
+  isEating = false;
   if (keyHoldTimeout) clearTimeout(keyHoldTimeout);
   bot.pathfinder.stop();
   bot.clearControlStates();
@@ -608,7 +747,7 @@ function stopAll(bot, msg) {
 function startSafeAfk(bot) {
   if (afkInterval) clearInterval(afkInterval);
   afkInterval = setInterval(() => {
-    if (bot.pathfinder.isMoving() || currentFollowTarget || isExploring || isWorking) return;
+    if (bot.pathfinder.isMoving() || currentFollowTarget || isExploring || isWorking || isEating) return;
     bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.4, false);
     if (Math.random() > 0.5) bot.swingArm('right');
   }, 9000);
