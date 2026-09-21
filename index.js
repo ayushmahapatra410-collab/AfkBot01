@@ -27,7 +27,7 @@ const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
 // AI Model & Key Configuration via Variable
 const rawApiKey = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY || '';
 const OPENROUTER_API_KEY = rawApiKey.trim();
-const MODEL_NAME = 'google/gemma-4-26b-a4b-it:free';
+const MODEL_NAME = 'qwen/qwen3.8-27b:free';
 
 // State Machine
 let afkInterval = null;
