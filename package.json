@@ -1,7 +1,7 @@
 {
-  "name": "aternos-bot",
-  "version": "1.0.0",
-  "description": "Smart AI Minecraft Bot for Aternos",
+  "name": "cassie-ai-companion",
+  "version": "2.0.0",
+  "description": "Smart AI Companion & AFK Bot for Minecraft",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -11,6 +11,7 @@
     "express": "^4.19.2",
     "minecraft-data": "^3.57.0",
     "mineflayer": "^4.22.0",
-    "mineflayer-pathfinder": "^2.4.5"
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.1.10"
   }
 }
