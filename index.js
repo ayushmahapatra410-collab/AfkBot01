@@ -1,14 +1,14 @@
 const mineflayer = require('mineflayer');
 const express = require('express');
-const axios = require('axios');
 const { Vec3 } = require('vec3');
+const { GoogleGenAI } = require('@google/genai');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalFollow, GoalNear, GoalXZ, GoalBlock } = goals;
 
-// --- Web Server (24/7 Hosting Shield) ---
+// --- Web Server (Keep-Alive Shield) ---
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Cassie Master AI Companion is Online!'));
+app.get('/', (req, res) => res.send('Cassie is Online with Google AI Studio (GenAI)!'));
 app.listen(port, () => console.log(`[Web] Listening on port ${port}`));
 
 // --- Server Configurations ---
@@ -24,9 +24,15 @@ let spawnAnchor = null;
 // Owners List
 const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
 
-// AI Model & Key Configuration via Variable
-const rawApiKey = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY || '';
-const MODEL_NAME = 'google/gemma-4-26b-a4b-it';
+// Google AI Studio API Key
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
+const MODEL_NAME = 'gemini-2.5-flash';
+
+// Initialize Google GenAI SDK
+let ai = null;
+if (GEMINI_API_KEY) {
+  ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+}
 
 // State Machine
 let afkInterval = null;
@@ -40,6 +46,7 @@ let keyHoldTimeout = null;
 let jumpCooldown = false;
 let lastHealthAlert = 0;
 let lastFoodAlert = 0;
+let lastSleepAttempt = 0;
 
 // Food Database
 const FOOD_NAMES = [
@@ -47,20 +54,14 @@ const FOOD_NAMES = [
   'golden_carrot', 'bread', 'baked_potato', 'apple', 'cooked_salmon', 'cooked_cod', 'carrot'
 ];
 
-// Hazard Blocks (Campfire, Lava, Fire)
+// Hazard Blocks (Campfire, Lava, Fire, Magma)
 const HAZARDS = ['campfire', 'soul_campfire', 'fire', 'soul_fire', 'lava', 'magma_block', 'sweet_berry_bush'];
 
 // Chat Buffer
 let chatMemory = [];
-let gameEventsLog = [];
 
 function isOwner(username) {
   return username && OWNERS.includes(username.toLowerCase());
-}
-
-function logGameEvent(event) {
-  gameEventsLog.push(`[${new Date().toLocaleTimeString()}] ${event}`);
-  if (gameEventsLog.length > 8) gameEventsLog.shift();
 }
 
 function startBot() {
@@ -75,7 +76,7 @@ function startBot() {
 
   bot.loadPlugin(pathfinder);
 
-  // 1. Spawn Event & Physics Init
+  // 1. Spawn Event
   bot.on('spawn', () => {
     console.log(`✅ ${bot.username} spawned into the world!`);
     spawnAnchor = bot.entity.position.clone();
@@ -103,7 +104,6 @@ function startBot() {
 
   // 2. Auto Respawn on Death
   bot.on('death', () => {
-    logGameEvent('Mar gayi!');
     stopAll(bot);
     setTimeout(() => {
       try { bot.respawn(); } catch (e) {}
@@ -177,7 +177,7 @@ function startBot() {
     }
   });
 
-  // 4. Survival Engine: 50% Health Warning & Food Consumption
+  // 4. Survival: 50% Health Warning & Food Engine
   bot.on('health', async () => {
     if (isEating || isSleeping) return;
     const now = Date.now();
@@ -202,9 +202,13 @@ function startBot() {
     }
   });
 
-  // 5. Night Bed Sleep Routine
+  // 5. Night Bed Sleep Routine (Anti-Spam 60s Cooldown)
   bot.on('time', async () => {
     if (isSleeping || isWorking) return;
+
+    const now = Date.now();
+    if (now - lastSleepAttempt < 60000) return;
+
     const time = bot.time.timeOfDay;
     if (time >= 12500 && time <= 23000) {
       const bed = bot.findBlock({
@@ -213,6 +217,7 @@ function startBot() {
       });
 
       if (bed) {
+        lastSleepAttempt = now;
         try {
           isSleeping = true;
           stopAll(bot);
@@ -241,7 +246,7 @@ function startBot() {
     if (attacker) proAttack(bot, attacker);
   });
 
-  // 7. Main Chat Router & Parser
+  // 7. Chat Router & Parser
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
@@ -256,7 +261,7 @@ function startBot() {
       return;
     }
 
-    // Stop Everything Override
+    // Stop Override
     if (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop' || cleanMsg.toLowerCase() === '!ruk' || cleanMsg.toLowerCase() === '!rukja') {
       stopAll(bot, 'Ruk gayi, sab cancel!');
       return;
@@ -333,7 +338,7 @@ function startBot() {
       return;
     }
 
-    // --- MOUSE CAMERA CONTROLS ---
+    // --- CAMERA LOOK ---
     if (query.includes('upar dekh') || query === 'look up') {
       bot.look(bot.entity.yaw, Math.PI / 3, true);
       bot.chat('Upar dekh rahi hu!');
@@ -481,17 +486,16 @@ function startBot() {
       return;
     }
 
-    // --- OpenRouter Gemma 4 AI Brain ---
+    // --- Google AI Studio (GenAI SDK) Brain ---
     try {
-      await handleCassieAI(bot, username, cleanMsg.substring(1).trim());
+      await handleCassieGoogleAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
-      const errorMsg = err.response?.data?.error?.message || err.message;
-      console.error('AI Error:', errorMsg);
-      bot.chat(`@${username} Dimag lag ho gaya: ${errorMsg.substring(0, 45)}`);
+      console.error('Google GenAI Error:', err.message);
+      bot.chat(`@${username} Dimag lag ho gaya: ${err.message.substring(0, 45)}`);
     }
   });
 
-  // Combat loop for nearby creepers
+  // Combat loop
   setInterval(() => {
     if (currentFollowTarget || isExploring || isWorking || isEating || isSleeping) return;
     const dangerMob = bot.nearestEntity(e => 
@@ -526,7 +530,7 @@ function startBot() {
   bot.on('error', (e) => console.error('[Bot Error]:', e.message));
 }
 
-// --- Multi-Key Simulator ---
+// Multi-Key Simulator
 function triggerComboKeys(bot, controls = [], durationMs = 1200) {
   bot.pathfinder.stop();
   currentFollowTarget = null;
@@ -541,7 +545,7 @@ function triggerComboKeys(bot, controls = [], durationMs = 1200) {
   }, durationMs);
 }
 
-// --- Exact Count Mining Engine ---
+// Exact Count Mining Engine
 async function mineSpecificBlocks(bot, rawName, count) {
   if (isWorking) return;
   isWorking = true;
@@ -590,7 +594,7 @@ async function mineSpecificBlocks(bot, rawName, count) {
   isWorking = false;
 }
 
-// --- Tree Chopper & Replant ---
+// Tree Chopper & Replant
 async function chopNearestTrees(bot) {
   if (isWorking) return;
   isWorking = true;
@@ -644,7 +648,7 @@ async function chopNearestTrees(bot) {
   bot.chat('Ped kat gaye!');
 }
 
-// --- Torches Breaker ---
+// Torches Breaker
 async function breakAllTorchesAround(bot) {
   if (isWorking) return;
   isWorking = true;
@@ -680,7 +684,7 @@ async function breakAllTorchesAround(bot) {
   isWorking = false;
 }
 
-// --- Food Engine ---
+// Food Engine
 async function consumeFood(bot, foodItem) {
   if (isEating) return;
   isEating = true;
@@ -712,7 +716,7 @@ async function forceEatFood(bot) {
   }
 }
 
-// --- Go to Bed ---
+// Go to Bed
 async function goToBed(bot) {
   const bed = bot.findBlock({
     matching: (b) => b && b.name.includes('bed'),
@@ -735,7 +739,7 @@ async function goToBed(bot) {
   }
 }
 
-// --- Torch Placement ---
+// Torch Placement
 async function placeTorchOnGround(bot) {
   const torch = bot.inventory.items().find(i => i.name.includes('torch'));
   if (!torch) {
@@ -756,7 +760,7 @@ async function placeTorchOnGround(bot) {
   }
 }
 
-// --- Vision Reporter ---
+// Vision
 function reportVision(bot, sender) {
   const block = bot.blockAtCursor(5);
   const targetEntity = bot.nearestEntity(e => e.type !== 'object' && e !== bot.entity && bot.entity.position.distanceTo(e.position) < 6);
@@ -772,7 +776,7 @@ function reportVision(bot, sender) {
   }
 }
 
-// --- Inventory Details ---
+// Inventory
 function reportInventory(bot, sender) {
   const items = bot.inventory.items();
   if (items.length === 0) {
@@ -783,7 +787,7 @@ function reportInventory(bot, sender) {
   bot.chat(`@${sender} Mere paas: ${summary.length > 170 ? summary.substring(0, 165) + '...' : summary}`);
 }
 
-// --- Drop Items Stack by Stack ---
+// Drop Items
 async function dropItems(bot, matchName) {
   const items = bot.inventory.items();
   if (items.length === 0) {
@@ -811,7 +815,7 @@ async function dropItems(bot, matchName) {
   bot.chat('Ye lo, sab drop kar diya!');
 }
 
-// --- Critical Combat Attack ---
+// Pro Attack
 async function proAttack(bot, target) {
   if (isOwner(target.username)) return;
 
@@ -828,7 +832,7 @@ async function proAttack(bot, target) {
   }, 220);
 }
 
-// --- Explore Cycle with 12-Chunk Edge Guard ---
+// Explore
 function runExploreCycle(bot) {
   if (!isExploring) return;
   const pos = bot.entity.position;
@@ -847,17 +851,17 @@ function runExploreCycle(bot) {
   }, 12000);
 }
 
-// --- Gemma AI Brain via OpenRouter ---
-async function handleCassieAI(bot, sender, userPrompt) {
-  if (!OPENROUTER_API_KEY) {
-    bot.chat(`@${sender} OPENROUTER_API_KEY environment variable set nahi hai!`);
+// --- Google AI Studio (Official GenAI SDK) Implementation ---
+async function handleCassieGoogleAI(bot, sender, userPrompt) {
+  if (!ai) {
+    bot.chat(`@${sender} GEMINI_API_KEY set nahi hai!`);
     return;
   }
 
   const senderIsOwner = isOwner(sender);
   const invItems = bot.inventory.items().map(i => `${i.name} (x${i.count})`).join(', ') || 'Khali hai';
 
-  const systemPrompt = `
+  const systemInstruction = `
 You are Cassie, a friendly and pro female gamer playing as a real autonomous player on a Minecraft SMP.
 STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon"[cite: 2].
 
@@ -885,33 +889,25 @@ Action Tags (Add at the VERY END only if action needed):
 - Eat: [[ACTION: {"type": "eat"}]]
 `;
 
-  chatMemory.push({ role: 'user', content: `${sender}: ${userPrompt}` });
+  chatMemory.push({ role: 'user', parts: [{ text: `${sender}: ${userPrompt}` }] });
   if (chatMemory.length > 8) chatMemory.shift();
 
-  const response = await axios.post(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      model: MODEL_NAME,
-      messages: [{ role: 'system', content: systemPrompt }, ...chatMemory],
-      max_tokens: 80,
+  // Call official Google GenAI SDK
+  const response = await ai.models.generateContent({
+    model: MODEL_NAME,
+    contents: chatMemory,
+    config: {
+      systemInstruction: systemInstruction,
+      maxOutputTokens: 80,
       temperature: 0.6
-    },
-    {
-      headers: {
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://railway.app',
-        'X-Title': 'Cassie Minecraft Bot'
-      },
-      timeout: 8000
     }
-  );
+  });
 
-  const rawReply = response.data.choices[0].message.content.trim();
+  const rawReply = (response.text || '').trim();
   const actionMatch = rawReply.match(/\[\[ACTION:\s*(\{.*?\})\]\]/);
   let chatText = rawReply.replace(/\[\[ACTION:\s*(\{.*?\})\]\]/, '').trim();
 
-  chatMemory.push({ role: 'assistant', content: chatText });
+  chatMemory.push({ role: 'model', parts: [{ text: chatText }] });
 
   if (chatText) {
     if (chatText.length > 200) chatText = chatText.substring(0, 197) + '...';
@@ -1005,7 +1001,7 @@ function startSafeAfk(bot) {
   }, 9000);
 }
 
-// Error guards
+// Global Crash Shields
 process.on('uncaughtException', (err) => console.error('[Uncaught Exception]:', err.message));
 process.on('unhandledRejection', (reason) => console.error('[Unhandled Rejection]:', reason));
 
