@@ -3,51 +3,64 @@ const express = require('express');
 const axios = require('axios');
 const { Vec3 } = require('vec3');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalFollow, GoalXZ } = goals;
+const { GoalFollow, GoalNear, GoalXZ, GoalBlock } = goals;
 
-// --- Web Server (24/7 Hosting) ---
+// --- Web Server (24/7 Hosting Shield) ---
 const app = express();
 const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Cassie is Online with Gemma 4!'));
-app.listen(port, () => console.log(`Listening on port ${port}`));
+app.get('/', (req, res) => res.send('Cassie Master AI Companion is Online!'));
+app.listen(port, () => console.log(`[Web] Listening on port ${port}`));
 
-// --- Configurations ---
+// --- Server Configurations ---
 const SERVER_IP = 'YSsmpontop.aternos.me';
 const BOT_USERNAME = 'Cassie';
 const VERSION = '1.20.4';
 const DEFAULT_SKIN = 'chloepowell';
 
-// Owners
+// 12 Chunks Simulation Boundary (12 * 16 = 192 blocks)
+const MAX_SIMULATION_RADIUS = 192;
+let spawnAnchor = null;
+
+// Owners List
 const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase());
 
-// OpenRouter Key & Gemma Model
+// AI Model via OpenRouter
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY || '';
 const MODEL_NAME = 'google/gemma-4-26b-a4b-it';
 
+// State Machine
 let afkInterval = null;
 let currentFollowTarget = null;
 let isExploring = false;
 let isWorking = false;
 let isEating = false;
+let isSleeping = false;
 let isReconnecting = false;
 let keyHoldTimeout = null;
 let jumpCooldown = false;
-let lastFoodAskTime = 0;
+let lastHealthAlert = 0;
+let lastFoodAlert = 0;
 
-// Food items list
+// Food Database
 const FOOD_NAMES = [
   'cooked_beef', 'steak', 'cooked_porkchop', 'cooked_mutton', 'cooked_chicken',
   'golden_carrot', 'bread', 'baked_potato', 'apple', 'cooked_salmon', 'cooked_cod', 'carrot'
 ];
 
-// Dangerous blocks to avoid
+// Hazard Blocks (Campfire, Lava, Fire)
 const HAZARDS = ['campfire', 'soul_campfire', 'fire', 'soul_fire', 'lava', 'magma_block', 'sweet_berry_bush'];
 
-// Memory Buffer
+// Chat Buffer
 let chatMemory = [];
+let gameEventsLog = [];
 
 function isOwner(username) {
   return username && OWNERS.includes(username.toLowerCase());
+}
+
+function logGameEvent(event) {
+  gameEventsLog.push(`[${new Date().toLocaleTimeString()}] ${event}`);
+  if (gameEventsLog.length > 8) gameEventsLog.shift();
 }
 
 function startBot() {
@@ -62,13 +75,16 @@ function startBot() {
 
   bot.loadPlugin(pathfinder);
 
+  // 1. Spawn Event & Physics Init
   bot.on('spawn', () => {
-    console.log(`✅ ${bot.username} spawned in world!`);
+    console.log(`✅ ${bot.username} spawned into the world!`);
+    spawnAnchor = bot.entity.position.clone();
+
     try {
       const mcData = require('minecraft-data')(bot.version);
       const defaultMove = new Movements(bot, mcData);
 
-      defaultMove.canDig = false;
+      defaultMove.canDig = true;
       defaultMove.allowParkour = true;
       defaultMove.allowSprinting = true;
       defaultMove.canOpenDoors = true;
@@ -78,43 +94,66 @@ function startBot() {
 
       bot.pathfinder.setMovements(defaultMove);
     } catch (e) {
-      console.error('Movement init error:', e.message);
+      console.error('Movement setup error:', e.message);
     }
 
     setTimeout(() => bot.chat(`/skin ${DEFAULT_SKIN}`), 3000);
     startSafeAfk(bot);
   });
 
-  // Greet on Join
+  // 2. Auto Greet on Join
   bot.on('playerJoined', (player) => {
     if (!player || player.username === bot.username) return;
     setTimeout(() => {
       if (isOwner(player.username)) {
-        bot.chat(`Arey @${player.username} aagaye! Welcome back owner ji!`);
+        const ownerGreetings = [
+          `Arey @${player.username} aagaye! Welcome back owner ji!`,
+          `Welcome @${player.username}! Server me ab maza aayega!`
+        ];
+        bot.chat(ownerGreetings[Math.floor(Math.random() * ownerGreetings.length)]);
       } else {
-        bot.chat(`Yo @${player.username}! Welcome to the server!`);
+        const memberGreetings = [
+          `Yo @${player.username}! Welcome to the server!`,
+          `Hey @${player.username}, welcome! Sab theek thak?`
+        ];
+        bot.chat(memberGreetings[Math.floor(Math.random() * memberGreetings.length)]);
       }
     }, 2500);
   });
 
-  // Auto Respawn
+  // 3. Auto Respawn on Death
   bot.on('death', () => {
+    logGameEvent('Mar gayi!');
     stopAll(bot);
     setTimeout(() => {
       try { bot.respawn(); } catch (e) {}
     }, 2000);
   });
 
-  // --- Real-Player Slab Jump + Hazard Avoidance (Campfire/Lava) ---
+  // 4. Human Physics, Hazard Avoidance & 12-Chunk Edge Protection
   bot.on('physicsTick', () => {
-    // 1. HAZARD DETECTION (Campfire / Fire / Magma se turant bhago)
+    // 12-Chunk Boundary Guard
+    if (spawnAnchor) {
+      const distFromCenter = bot.entity.position.distanceTo(spawnAnchor);
+      if (distFromCenter > MAX_SIMULATION_RADIUS) {
+        bot.clearControlStates();
+        bot.pathfinder.stop();
+        isExploring = false;
+        bot.chat('Simulation boundary ke edge par aa gayi, peeche mud rahi hu!');
+        bot.lookAt(spawnAnchor, true);
+        bot.setControlState('forward', true);
+        setTimeout(() => bot.clearControlStates(), 2200);
+        return;
+      }
+    }
+
+    // Hazard Avoidance (Campfire, Lava, Fire)
     const blockUnder = bot.blockAt(bot.entity.position);
     const blockDirectBelow = bot.blockAt(bot.entity.position.offset(0, -0.5, 0));
+    const isHazard = (blockUnder && HAZARDS.includes(blockUnder.name)) ||
+                     (blockDirectBelow && HAZARDS.includes(blockDirectBelow.name));
 
-    const isStandingOnHazard = (blockUnder && HAZARDS.includes(blockUnder.name)) ||
-                               (blockDirectBelow && HAZARDS.includes(blockDirectBelow.name));
-
-    if (isStandingOnHazard) {
+    if (isHazard) {
       bot.setControlState('jump', true);
       bot.setControlState('back', true);
       setTimeout(() => {
@@ -124,7 +163,7 @@ function startBot() {
       return;
     }
 
-    if (!currentFollowTarget || isEating || isWorking) return;
+    if (!currentFollowTarget || isEating || isWorking || isSleeping) return;
 
     const target = bot.players[currentFollowTarget]?.entity;
     if (!target) return;
@@ -135,11 +174,12 @@ function startBot() {
       return;
     }
 
+    // Camera track
     bot.lookAt(target.position.offset(0, target.height * 0.85, 0), true);
     bot.setControlState('forward', true);
     bot.setControlState('sprint', dist > 4.5);
 
-    // Slab & obstacle jump
+    // Obstacle / Slab / Stair Jump + Anti-Stuck Strafe
     const isCollided = bot.entity.isCollidedHorizontally;
     const blockAhead = bot.blockAtCursor(1.6);
     const hasObstacle = blockAhead && (blockAhead.name.includes('slab') || blockAhead.name.includes('stair') || blockAhead.boundingBox === 'block');
@@ -147,35 +187,71 @@ function startBot() {
     if ((isCollided || hasObstacle) && !jumpCooldown) {
       jumpCooldown = true;
       bot.setControlState('jump', true);
+      if (isCollided) bot.setControlState('left', Math.random() > 0.5);
+
       setTimeout(() => {
         bot.setControlState('jump', false);
+        bot.setControlState('left', false);
         jumpCooldown = false;
-      }, 300);
+      }, 320);
     }
   });
 
-  // --- Auto Hunger / Health Food Routine ---
+  // 5. Survival Engine: 50% Health Warning & Food Consumption
   bot.on('health', async () => {
-    if (isEating) return;
+    if (isEating || isSleeping) return;
+    const now = Date.now();
 
-    // Check if food needed
-    if (bot.food < 16 || (bot.health < 17 && bot.food < 20)) {
+    // 50% Health Alert
+    if (bot.health <= 10 && bot.health > 0) {
+      if (now - lastHealthAlert > 20000) {
+        lastHealthAlert = now;
+        bot.chat(`Warning! Meri health 50% ho chuki hai (${Math.round(bot.health)}/20)! Sambhalo mujhe!`);
+      }
+    }
+
+    // Hunger Check
+    if (bot.food < 15 || (bot.health < 18 && bot.food < 20)) {
       const foodItem = bot.inventory.items().find(i => FOOD_NAMES.includes(i.name));
-
       if (foodItem) {
         await consumeFood(bot, foodItem);
-      } else {
-        // Khana nahi hai to chat me maango (cooldown 20 seconds)
-        const now = Date.now();
-        if (now - lastFoodAskTime > 20000) {
-          lastFoodAskTime = now;
-          bot.chat('Mujhe bhookh lag rahi hai aur health kam ho rahi hai, thoda khana do na please!');
+      } else if (now - lastFoodAlert > 25000) {
+        lastFoodAlert = now;
+        bot.chat('Mujhe bhookh lag rahi hai, thoda khana do please!');
+      }
+    }
+  });
+
+  // 6. Night Bed Sleep Routine
+  bot.on('time', async () => {
+    if (isSleeping || isWorking) return;
+    const time = bot.time.timeOfDay;
+    if (time >= 12500 && time <= 23000) {
+      const bed = bot.findBlock({
+        matching: (b) => b && b.name.includes('bed'),
+        maxDistance: 16
+      });
+
+      if (bed) {
+        try {
+          isSleeping = true;
+          stopAll(bot);
+          bot.chat('Raat ho gayi hai, sone jaa rahi hu!');
+          await bot.sleep(bed);
+          bot.chat('Good night guys!');
+        } catch (err) {
+          isSleeping = false;
         }
       }
     }
   });
 
-  // Self Defense with Critical Hits
+  bot.on('wake', () => {
+    isSleeping = false;
+    bot.chat('Subah ho gayi, uth gayi hu!');
+  });
+
+  // 7. Self Defense with Critical Hits
   bot.on('entityHurt', (entity) => {
     if (entity !== bot.entity) return;
     const attacker = bot.nearestEntity(e => 
@@ -185,11 +261,12 @@ function startBot() {
     if (attacker) proAttack(bot, attacker);
   });
 
-  // Chat Router
+  // 8. Main Chat Router & Parser
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
 
+    // Owner Console Command
     if (cleanMsg.startsWith('!cmd ')) {
       if (!isOwner(username)) {
         bot.chat(`@${username} Sirf owner console commands chala sakte hain!`);
@@ -199,7 +276,8 @@ function startBot() {
       return;
     }
 
-    if (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop') {
+    // Stop Everything Override
+    if (cleanMsg === '!stop' || cleanMsg.toLowerCase() === '!cassie stop' || cleanMsg.toLowerCase() === '!ruk' || cleanMsg.toLowerCase() === '!rukja') {
       stopAll(bot, 'Ruk gayi, sab cancel!');
       return;
     }
@@ -208,7 +286,9 @@ function startBot() {
     const query = cleanMsg.substring(1).trim().toLowerCase();
     if (!query) return;
 
-    // Direct Key Combos
+    const isNegative = query.includes('mat') || query.includes('not') || query.includes('dont') || query.includes('nahi');
+
+    // --- MULTI-KEY COMBOS ---
     if (query === 'w+space' || query === 'w space' || query.includes('jump walk') || query === 'kud ke aage aa') {
       triggerComboKeys(bot, ['forward', 'jump'], 1400);
       bot.chat('W + Space daba rahi hu!');
@@ -219,12 +299,34 @@ function startBot() {
       bot.chat('Sprint jump maar rahi hu!');
       return;
     }
+    if (query === 'w+d' || query === 'w d') {
+      triggerComboKeys(bot, ['forward', 'right'], 1000);
+      bot.chat('W + D pressed!');
+      return;
+    }
+    if (query === 'w+a' || query === 'w a') {
+      triggerComboKeys(bot, ['forward', 'left'], 1000);
+      bot.chat('W + A pressed!');
+      return;
+    }
+    if (query === 's+d' || query === 's d') {
+      triggerComboKeys(bot, ['back', 'right'], 1000);
+      bot.chat('S + D pressed!');
+      return;
+    }
+    if (query === 's+a' || query === 's a') {
+      triggerComboKeys(bot, ['back', 'left'], 1000);
+      bot.chat('S + A pressed!');
+      return;
+    }
+
+    // --- SINGLE WASD KEYS ---
     if (['w', 'aage', 'forward'].includes(query)) {
       triggerComboKeys(bot, ['forward'], 1200);
       bot.chat('W pressed!');
       return;
     }
-    if (['s', 'peeche', 'back'].includes(query)) {
+    if (['s', 'peeche', 'back', 'pichhe'].includes(query)) {
       triggerComboKeys(bot, ['back'], 1200);
       bot.chat('S pressed!');
       return;
@@ -244,8 +346,14 @@ function startBot() {
       bot.chat('Jumped!');
       return;
     }
+    if (['crouch', 'sneak', 'shift'].includes(query)) {
+      const isSneaking = bot.getControlState('sneak');
+      bot.setControlState('sneak', !isSneaking);
+      bot.chat(!isSneaking ? 'Sneak on!' : 'Sneak off!');
+      return;
+    }
 
-    // Camera Look
+    // --- MOUSE CAMERA CONTROLS ---
     if (query.includes('upar dekh') || query === 'look up') {
       bot.look(bot.entity.yaw, Math.PI / 3, true);
       bot.chat('Upar dekh rahi hu!');
@@ -256,64 +364,144 @@ function startBot() {
       bot.chat('Niche dekh rahi hu!');
       return;
     }
+    if (query.includes('left dekh') || query === 'look left') {
+      bot.look(bot.entity.yaw + Math.PI / 2, bot.entity.pitch, true);
+      bot.chat('Left ghumaya!');
+      return;
+    }
+    if (query.includes('right dekh') || query === 'look right') {
+      bot.look(bot.entity.yaw - Math.PI / 2, bot.entity.pitch, true);
+      bot.chat('Right ghumaya!');
+      return;
+    }
     if (query.includes('meri taraf dekh') || query.includes('look at me')) {
       const player = bot.players[username]?.entity;
       if (player) {
         bot.lookAt(player.position.offset(0, player.height * 0.85, 0), true);
         bot.chat(`@${username} dekh rahi hu!`);
+      } else {
+        bot.chat(`@${username} tu dikh nahi raha!`);
       }
       return;
     }
 
-    // Vision
+    // --- SMART EXPLORE ---
+    if (!isNegative && (query === 'explore' || query.includes('explore kar') || query.includes('ghoom ke aa') || query.includes('explore on ur own'))) {
+      currentFollowTarget = null;
+      isExploring = true;
+      bot.pathfinder.stop();
+      bot.clearControlStates();
+      bot.chat('Theek hai, akele explore karne jaa rahi hu!');
+      runExploreCycle(bot);
+      return;
+    }
+
+    // --- SMART FOLLOW ---
+    if (!isNegative && (query.includes('pass aa') || query.includes('follow') || query.includes('aaja') || query.includes('mere pass') || query.includes('idhr aa') || query.includes('idhar aa'))) {
+      isExploring = false;
+      const player = bot.players[username]?.entity;
+      if (player) {
+        currentFollowTarget = username;
+        bot.pathfinder.setGoal(new GoalFollow(player, 2.0), true);
+        bot.chat(`Aa rahi hu @${username}!`);
+      } else {
+        const targetPlayer = bot.players[username];
+        if (targetPlayer && targetPlayer.entity) {
+          bot.pathfinder.setGoal(new GoalNear(targetPlayer.entity.position.x, targetPlayer.entity.position.y, targetPlayer.entity.position.z, 2));
+          bot.chat(`Door ho gaye ho, location par aa rahi hu!`);
+        } else {
+          bot.chat(`@${username} Render range me nahi dikh rahe ho!`);
+        }
+      }
+      return;
+    }
+
+    // --- EXACT COUNT BLOCK MINING (e.g. "!5 wood tod", "!3 stone break") ---
+    const mineRegex = /(?:(\d+)\s+)?([a-zA-Z_]+)\s+(?:tod|break|mine|kaat)/i;
+    const match = query.match(mineRegex);
+    if (match && !query.includes('torch')) {
+      const count = match[1] ? parseInt(match[1]) : 1;
+      const blockName = match[2].toLowerCase();
+      mineSpecificBlocks(bot, blockName, count);
+      return;
+    }
+
+    // --- DIRECT ITEM SWITCH ENGINE ---
+    if (query.includes('switch') || query.includes('pakad') || query.includes('equip') || query.includes('hath me le')) {
+      let targetItem = null;
+      if (query.includes('sword') || query.includes('talwar')) targetItem = 'sword';
+      else if (query.includes('stick')) targetItem = 'stick';
+      else if (query.includes('axe') || query.includes('kulhadi')) targetItem = 'axe';
+      else if (query.includes('pickaxe')) targetItem = 'pickaxe';
+      else if (query.includes('torch')) targetItem = 'torch';
+
+      if (targetItem) {
+        const itemObj = bot.inventory.items().find(i => i.name.toLowerCase().includes(targetItem));
+        if (itemObj) {
+          try {
+            await bot.equip(itemObj, 'hand');
+            bot.chat(`${itemObj.displayName || itemObj.name} pakad liya!`);
+          } catch (e) {
+            bot.chat('Item pakadne me dikkat aayi!');
+          }
+        } else {
+          bot.chat(`Mere paas koi ${targetItem} nahi hai!`);
+        }
+        return;
+      }
+    }
+
+    // --- TORCH MECHANICS ---
+    if (query.includes('torch tod') || query.includes('break torch') || query.includes('torches break') || query.includes('torch hatao')) {
+      breakAllTorchesAround(bot);
+      return;
+    }
+    if (query.includes('torch laga') || query.includes('torch place')) {
+      placeTorchOnGround(bot);
+      return;
+    }
+
+    // --- VISION & INVENTORY ---
     if (query.includes('samne kya hai') || query.includes('kya dikh raha hai') || query === 'look') {
       reportVision(bot, username);
       return;
     }
-
-    // Inventory
     if (query.includes('kya hai') || query === 'inv' || query === 'inventory' || query.includes('items')) {
       reportInventory(bot, username);
       return;
     }
 
-    // Instant Follow
-    if (query.includes('pass aa') || query.includes('follow') || query.includes('aaja') || query.includes('mere pass')) {
-      isExploring = false;
-      bot.pathfinder.stop();
-      const player = bot.players[username]?.entity;
-      if (player) {
-        currentFollowTarget = username;
-        bot.chat(`Aa rahi hu @${username}!`);
-      } else {
-        bot.chat(`@${username} Render range me nahi dikh raha tu, thoda samne aa!`);
-      }
-      return;
-    }
-
-    // Work Shortcuts
+    // --- TREE CHOPPING & REPLANT ---
     if (query.includes('tree') || query.includes('ped kaat') || query.includes('wood')) {
       chopNearestTrees(bot);
       return;
     }
-    if (query.includes('torch tod') || query.includes('break torch') || query.includes('torches break')) {
-      breakAllTorchesAround(bot);
+
+    // --- ITEM DROPPING ---
+    if (query.startsWith('drop ') || query.includes('phek') || query.includes('feko')) {
+      let matchItem = 'all';
+      if (query.includes('sword')) matchItem = 'sword';
+      else if (query.includes('wood') || query.includes('log')) matchItem = 'log';
+      else if (query.includes('stick')) matchItem = 'stick';
+      else if (query.includes('dirt')) matchItem = 'dirt';
+      else if (query.includes('stone')) matchItem = 'cobblestone';
+      dropItems(bot, matchItem);
       return;
     }
-    if (query.includes('torch laga') || query.includes('light up') || query.includes('torch')) {
-      placeTorchOnGround(bot);
+
+    // --- BED SLEEP ---
+    if (query.includes('soja') || query.includes('sleep') || query.includes('bed')) {
+      goToBed(bot);
       return;
     }
-    if (query.includes('block tod') || query.includes('break block') || query.includes('dig')) {
-      breakBlockInFront(bot);
-      return;
-    }
+
+    // --- FORCE FOOD CONSUME ---
     if (query.includes('khana khao') || query.includes('eat')) {
       forceEatFood(bot);
       return;
     }
 
-    // OpenRouter Gemma 4 AI Brain
+    // --- OpenRouter Gemma 4 AI Brain ---
     try {
       await handleCassieAI(bot, username, cleanMsg.substring(1).trim());
     } catch (err) {
@@ -323,9 +511,9 @@ function startBot() {
     }
   });
 
-  // Combat loop
+  // Combat loop for nearby creepers
   setInterval(() => {
-    if (currentFollowTarget || isExploring || isWorking || isEating) return;
+    if (currentFollowTarget || isExploring || isWorking || isEating || isSleeping) return;
     const dangerMob = bot.nearestEntity(e => 
       ['creeper', 'zombie', 'skeleton', 'spider'].includes(e.name) &&
       bot.entity.position.distanceTo(e.position) < 4.5
@@ -358,7 +546,7 @@ function startBot() {
   bot.on('error', (e) => console.error('[Bot Error]:', e.message));
 }
 
-// Multi-Key Simulator
+// --- Multi-Key Simulator ---
 function triggerComboKeys(bot, controls = [], durationMs = 1200) {
   bot.pathfinder.stop();
   currentFollowTarget = null;
@@ -373,133 +561,56 @@ function triggerComboKeys(bot, controls = [], durationMs = 1200) {
   }, durationMs);
 }
 
-// --- Food Consume Engine ---
-async function consumeFood(bot, foodItem) {
-  if (isEating) return;
-  isEating = true;
-
-  const currentWeapon = bot.inventory.items().find(i => i.name.includes('sword') || i.name.includes('axe'));
-
-  try {
-    bot.chat('Ruko, thoda khana kha leti hu!');
-    await bot.equip(foodItem, 'hand');
-    await bot.consume();
-    bot.chat('Mast khana tha! Pet bhar gaya.');
-
-    // Khane ke baad wapas weapon hotbar me equip kare
-    if (currentWeapon) {
-      await bot.equip(currentWeapon, 'hand');
-    }
-  } catch (e) {
-    console.error('Eat error:', e.message);
-  } finally {
-    isEating = false;
-  }
-}
-
-async function forceEatFood(bot) {
-  const foodItem = bot.inventory.items().find(i => FOOD_NAMES.includes(i.name));
-  if (foodItem) {
-    await consumeFood(bot, foodItem);
-  } else {
-    bot.chat('Mere paas koi khane ka item nahi hai!');
-  }
-}
-
-// --- Break ALL Torches Nearby (Dhoondh ke todna) ---
-async function breakAllTorchesAround(bot) {
+// --- Exact Count Mining Engine ---
+async function mineSpecificBlocks(bot, rawName, count) {
   if (isWorking) return;
   isWorking = true;
 
-  const torchPositions = bot.findBlocks({
-    matching: (b) => b && b.name && (b.name.includes('torch')),
-    maxDistance: 12,
-    count: 20
+  let searchName = rawName;
+  if (rawName.includes('wood') || rawName.includes('tree')) searchName = '_log';
+  if (rawName.includes('stone') || rawName.includes('cobble')) searchName = 'cobblestone';
+
+  const blocks = bot.findBlocks({
+    matching: (b) => b && b.name && b.name.toLowerCase().includes(searchName),
+    maxDistance: 16,
+    count: count
   });
 
-  if (!torchPositions || torchPositions.length === 0) {
-    bot.chat('Aas-paas koi torch nahi mili todne ke liye!');
+  if (!blocks || blocks.length === 0) {
+    bot.chat(`Aas-paas koi ${rawName} nahi mila todne ke liye!`);
     isWorking = false;
     return;
   }
 
-  bot.chat(`${torchPositions.length} torches mili hain, sab tod rahi hu!`);
+  bot.chat(`Theek hai, exact ${Math.min(blocks.length, count)} ${rawName} tod rahi hu!`);
 
-  for (const pos of torchPositions) {
-    const block = bot.blockAt(pos);
-    if (!block || !block.name.includes('torch')) continue;
+  let broken = 0;
+  for (const pos of blocks) {
+    if (broken >= count) break;
+    const targetBlock = bot.blockAt(pos);
+    if (!targetBlock || targetBlock.name === 'air') continue;
+
+    const tool = bot.pathfinder.bestHarvestTool(targetBlock);
+    if (tool) {
+      try { await bot.equip(tool, 'hand'); } catch (e) {}
+    }
 
     try {
-      await bot.lookAt(pos, true);
-      await bot.dig(block);
+      await bot.pathfinder.goto(new GoalNear(pos.x, pos.y, pos.z, 2));
+      await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true);
+      await bot.dig(targetBlock);
+      broken++;
       await bot.waitForTicks(4);
     } catch (err) {
       continue;
     }
   }
 
-  bot.chat('Saari torches tod di!');
+  bot.chat(`Ho gaya! Exact ${broken} ${rawName} tod diye!`);
   isWorking = false;
 }
 
-// Vision
-function reportVision(bot, sender) {
-  const block = bot.blockAtCursor(5);
-  const targetEntity = bot.nearestEntity(e => e.type !== 'object' && e !== bot.entity && bot.entity.position.distanceTo(e.position) < 6);
-
-  let desc = [];
-  if (block && block.name !== 'air') desc.push(`samne ${block.displayName || block.name} hai`);
-  if (targetEntity) desc.push(`paas me ek ${targetEntity.displayName || targetEntity.name} hai`);
-
-  if (desc.length > 0) {
-    bot.chat(`@${sender} Mujhe ${desc.join(' aur ')}!`);
-  } else {
-    bot.chat(`@${sender} Samne plain area hai, kuch khas nahi dikh raha!`);
-  }
-}
-
-// Torch Placement
-async function placeTorchOnGround(bot) {
-  const torch = bot.inventory.items().find(i => i.name.includes('torch'));
-  if (!torch) {
-    bot.chat('Mere paas koi torch nahi hai!');
-    return;
-  }
-  const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-  if (!blockBelow || blockBelow.name === 'air') {
-    bot.chat('Zameen theek nahi hai!');
-    return;
-  }
-  try {
-    await bot.equip(torch, 'hand');
-    await bot.placeBlock(blockBelow, new Vec3(0, 1, 0));
-    bot.chat('Torch laga di!');
-  } catch (err) {
-    bot.chat('Torch lagane me dikkat aayi!');
-  }
-}
-
-// Break block in front
-async function breakBlockInFront(bot) {
-  const targetBlock = bot.blockAtCursor(4);
-  if (!targetBlock || targetBlock.name === 'air' || targetBlock.name === 'bedrock') {
-    bot.chat('Samne koi todne layak block nahi hai!');
-    return;
-  }
-  const tool = bot.pathfinder.bestHarvestTool(targetBlock);
-  if (tool) {
-    try { await bot.equip(tool, 'hand'); } catch (e) {}
-  }
-  try {
-    bot.chat(`Tod rahi hu ${targetBlock.displayName || targetBlock.name}...`);
-    await bot.dig(targetBlock);
-    bot.chat('Block tod diya!');
-  } catch (err) {
-    bot.chat('Block todne me issue hua!');
-  }
-}
-
-// Chop Trees & Replant
+// --- Tree Chopper & Replant ---
 async function chopNearestTrees(bot) {
   if (isWorking) return;
   isWorking = true;
@@ -553,7 +664,135 @@ async function chopNearestTrees(bot) {
   bot.chat('Ped kat gaye!');
 }
 
-// Inventory
+// --- Torches Breaker ---
+async function breakAllTorchesAround(bot) {
+  if (isWorking) return;
+  isWorking = true;
+
+  const torchPositions = bot.findBlocks({
+    matching: (b) => b && b.name && b.name.toLowerCase().includes('torch'),
+    maxDistance: 16,
+    count: 25
+  });
+
+  if (!torchPositions || torchPositions.length === 0) {
+    bot.chat('Aas-paas 16 blocks me koi torch nahi mili!');
+    isWorking = false;
+    return;
+  }
+
+  bot.chat(`${torchPositions.length} torches mili hain, todna shuru kar rahi hu!`);
+
+  for (const pos of torchPositions) {
+    const block = bot.blockAt(pos);
+    if (!block || !block.name.includes('torch')) continue;
+
+    try {
+      await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true);
+      await bot.dig(block);
+      await bot.waitForTicks(4);
+    } catch (err) {
+      continue;
+    }
+  }
+
+  bot.chat('Saari torches tod di!');
+  isWorking = false;
+}
+
+// --- Food Engine ---
+async function consumeFood(bot, foodItem) {
+  if (isEating) return;
+  isEating = true;
+
+  const currentWeapon = bot.inventory.items().find(i => i.name.includes('sword') || i.name.includes('axe'));
+
+  try {
+    bot.chat('Ruko, pehle khana kha leti hu!');
+    await bot.equip(foodItem, 'hand');
+    await bot.consume();
+    bot.chat('Pet bhar gaya, ab theek hu!');
+
+    if (currentWeapon) {
+      await bot.equip(currentWeapon, 'hand');
+    }
+  } catch (e) {
+    console.error('Eat error:', e.message);
+  } finally {
+    isEating = false;
+  }
+}
+
+async function forceEatFood(bot) {
+  const foodItem = bot.inventory.items().find(i => FOOD_NAMES.includes(i.name));
+  if (foodItem) {
+    await consumeFood(bot, foodItem);
+  } else {
+    bot.chat('Mere paas koi khane ka item nahi hai!');
+  }
+}
+
+// --- Go to Bed ---
+async function goToBed(bot) {
+  const bed = bot.findBlock({
+    matching: (b) => b && b.name.includes('bed'),
+    maxDistance: 16
+  });
+
+  if (!bed) {
+    bot.chat('Aas-paas koi bed nahi mila sone ke liye!');
+    return;
+  }
+
+  try {
+    bot.chat('Bed ke paas jaa rahi hu!');
+    await bot.pathfinder.goto(new GoalBlock(bed.position.x, bed.position.y, bed.position.z));
+    await bot.sleep(bed);
+    isSleeping = true;
+    bot.chat('So gayi hu!');
+  } catch (err) {
+    bot.chat('Bed pe so nahi paayi, shayad door hai ya raat nahi hui!');
+  }
+}
+
+// --- Torch Placement ---
+async function placeTorchOnGround(bot) {
+  const torch = bot.inventory.items().find(i => i.name.includes('torch'));
+  if (!torch) {
+    bot.chat('Mere paas koi torch nahi hai!');
+    return;
+  }
+  const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+  if (!blockBelow || blockBelow.name === 'air') {
+    bot.chat('Zameen theek nahi hai!');
+    return;
+  }
+  try {
+    await bot.equip(torch, 'hand');
+    await bot.placeBlock(blockBelow, new Vec3(0, 1, 0));
+    bot.chat('Torch laga di!');
+  } catch (err) {
+    bot.chat('Torch lagane me dikkat aayi!');
+  }
+}
+
+// --- Vision Reporter ---
+function reportVision(bot, sender) {
+  const block = bot.blockAtCursor(5);
+  const targetEntity = bot.nearestEntity(e => e.type !== 'object' && e !== bot.entity && bot.entity.position.distanceTo(e.position) < 6);
+
+  let desc = [];
+  if (block && block.name !== 'air') desc.push(`samne ${block.displayName || block.name} hai`);
+  if (targetEntity) desc.push(`paas me ek ${targetEntity.displayName || targetEntity.name} hai`);
+
+  if (desc.length > 0) {
+    bot.chat(`@${sender} Mujhe ${desc.join(' aur ')}!`);
+  } else {
+    bot.chat(`@${sender} Samne plain area hai, kuch khas nahi dikh raha!`);
+  }
+}
+
+// --- Inventory Details ---
 function reportInventory(bot, sender) {
   const items = bot.inventory.items();
   if (items.length === 0) {
@@ -564,7 +803,7 @@ function reportInventory(bot, sender) {
   bot.chat(`@${sender} Mere paas: ${summary.length > 170 ? summary.substring(0, 165) + '...' : summary}`);
 }
 
-// Drop items
+// --- Drop Items Stack by Stack ---
 async function dropItems(bot, matchName) {
   const items = bot.inventory.items();
   if (items.length === 0) {
@@ -592,7 +831,7 @@ async function dropItems(bot, matchName) {
   bot.chat('Ye lo, sab drop kar diya!');
 }
 
-// Combat Critical Attack
+// --- Critical Combat Attack ---
 async function proAttack(bot, target) {
   if (isOwner(target.username)) return;
 
@@ -609,7 +848,26 @@ async function proAttack(bot, target) {
   }, 220);
 }
 
-// Gemma AI Brain via OpenRouter
+// --- Explore Cycle with 12-Chunk Edge Guard ---
+function runExploreCycle(bot) {
+  if (!isExploring) return;
+  const pos = bot.entity.position;
+
+  const rx = pos.x + (Math.random() - 0.5) * 35;
+  const rz = pos.z + (Math.random() - 0.5) * 35;
+
+  if (spawnAnchor && new Vec3(rx, pos.y, rz).distanceTo(spawnAnchor) > MAX_SIMULATION_RADIUS) {
+    bot.pathfinder.setGoal(new GoalXZ(spawnAnchor.x, spawnAnchor.z));
+  } else {
+    bot.pathfinder.setGoal(new GoalXZ(rx, rz));
+  }
+
+  setTimeout(() => {
+    if (isExploring) runExploreCycle(bot);
+  }, 12000);
+}
+
+// --- Gemma AI Brain via OpenRouter ---
 async function handleCassieAI(bot, sender, userPrompt) {
   if (!OPENROUTER_API_KEY) {
     bot.chat(`@${sender} OPENROUTER_API_KEY set nahi hai!`);
@@ -620,28 +878,30 @@ async function handleCassieAI(bot, sender, userPrompt) {
   const invItems = bot.inventory.items().map(i => `${i.name} (x${i.count})`).join(', ') || 'Khali hai';
 
   const systemPrompt = `
-You are Cassie, a friendly and pro female gamer playing as a companion on a Minecraft SMP.
-STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon".
+You are Cassie, a friendly and pro female gamer playing as a real autonomous player on a Minecraft SMP.
+STRICT GENDER IDENTITY: You are 100% FEMALE. ALWAYS use feminine Hindi grammar ("aati hu", "karti hu", "samajh gayi", "aa rahi hu"). NEVER use "aata hoon", "karta hoon", or "raha hoon"[cite: 2].
 
 Context:
 - Talking to: ${sender} (Owner: ${senderIsOwner})
 - Real Inventory: [${invItems}]
 - Health: ${Math.round(bot.health)}/20
 - Food: ${Math.round(bot.food)}/20
+- State: ${isExploring ? 'Exploring' : currentFollowTarget ? `Following ${currentFollowTarget}` : 'Idle'}
 
 Rules:
-1. When asked about inventory, look at Real Inventory and state accurately.
-2. If asked to follow, move, chop trees, break torches, place torch, eat food, or drop items, output appropriate ACTION.
+1. When asked about inventory, look at Real Inventory and state accurately[cite: 2].
+2. If asked to equip, switch items, break torches, chop, eat, follow, use ACTION tags.
 3. Keep replies short, casual, and in cool girl Hinglish (under 60 chars).
 
 Action Tags (Add at the VERY END only if action needed):
 - Follow: [[ACTION: {"type": "follow", "target": "${sender}"}]]
+- Switch: [[ACTION: {"type": "equip", "item": "<item_name>"}]]
 - Stop: [[ACTION: {"type": "stop"}]]
 - Drop: [[ACTION: {"type": "drop", "item": "<item_name_or_all>"}]]
 - Chop: [[ACTION: {"type": "chop"}]]
 - Torch: [[ACTION: {"type": "torch"}]]
 - BreakTorch: [[ACTION: {"type": "break_torches"}]]
-- Break: [[ACTION: {"type": "break"}]]
+- Sleep: [[ACTION: {"type": "sleep"}]]
 - Eat: [[ACTION: {"type": "eat"}]]
 `;
 
@@ -699,6 +959,17 @@ async function executeAction(bot, sender, senderIsOwner, action) {
       const player = bot.players[action.target || sender]?.entity;
       if (player) {
         currentFollowTarget = action.target || sender;
+        bot.pathfinder.setGoal(new GoalFollow(player, 2.0), true);
+      }
+      break;
+    }
+    case 'equip': {
+      const itemToEquip = bot.inventory.items().find(i => i.name.toLowerCase().includes(action.item.toLowerCase()));
+      if (itemToEquip) {
+        try {
+          await bot.equip(itemToEquip, 'hand');
+          bot.chat(`${itemToEquip.displayName || itemToEquip.name} hath me le liya!`);
+        } catch (e) {}
       }
       break;
     }
@@ -714,8 +985,8 @@ async function executeAction(bot, sender, senderIsOwner, action) {
       breakAllTorchesAround(bot);
       break;
     }
-    case 'break': {
-      breakBlockInFront(bot);
+    case 'sleep': {
+      goToBed(bot);
       break;
     }
     case 'eat': {
@@ -738,6 +1009,7 @@ function stopAll(bot, msg) {
   isExploring = false;
   isWorking = false;
   isEating = false;
+  isSleeping = false;
   if (keyHoldTimeout) clearTimeout(keyHoldTimeout);
   bot.pathfinder.stop();
   bot.clearControlStates();
@@ -747,7 +1019,7 @@ function stopAll(bot, msg) {
 function startSafeAfk(bot) {
   if (afkInterval) clearInterval(afkInterval);
   afkInterval = setInterval(() => {
-    if (bot.pathfinder.isMoving() || currentFollowTarget || isExploring || isWorking || isEating) return;
+    if (bot.pathfinder.isMoving() || currentFollowTarget || isExploring || isWorking || isEating || isSleeping) return;
     bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.4, false);
     if (Math.random() > 0.5) bot.swingArm('right');
   }, 9000);
