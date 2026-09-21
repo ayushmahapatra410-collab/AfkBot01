@@ -26,7 +26,7 @@ const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
 
 // Google AI Studio API Key
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-const MODEL_NAME = 'gemini-2.5-flash';
+const MODEL_NAME = 'gemini-3.6-flash';
 
 // Initialize Google GenAI SDK
 let ai = null;
