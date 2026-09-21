@@ -1,13 +1,13 @@
 {
   "name": "cassie-ai-companion",
-  "version": "2.2.0",
-  "description": "Autonomous AI Companion & AFK Bot powered by Google AI Studio GenAI SDK",
+  "version": "2.3.0",
+  "description": "Autonomous AI Companion & AFK Bot powered by OpenRouter GPT-4o-mini",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@google/genai": "^2.0.0",
+    "axios": "^1.7.7",
     "express": "^4.19.2",
     "minecraft-data": "^3.57.0",
     "mineflayer": "^4.22.0",
