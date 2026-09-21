@@ -24,8 +24,9 @@ let spawnAnchor = null;
 // Owners List
 const OWNERS = ['NotGamerSpark', 'yuzu'].map(o => o.toLowerCase());
 
-// AI Model via OpenRouter
-const OPENROUTER_API_KEY = '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';
+// AI Model & Key Configuration via Variable
+const rawApiKey = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY || '';
+const OPENROUTER_API_KEY = rawApiKey.trim();
 const MODEL_NAME = 'google/gemma-4-26b-a4b-it';
 
 // State Machine
@@ -101,27 +102,7 @@ function startBot() {
     startSafeAfk(bot);
   });
 
-  // 2. Auto Greet on Join
-  bot.on('playerJoined', (player) => {
-    if (!player || player.username === bot.username) return;
-    setTimeout(() => {
-      if (isOwner(player.username)) {
-        const ownerGreetings = [
-          `Arey @${player.username} aagaye! Welcome back owner ji!`,
-          `Welcome @${player.username}! Server me ab maza aayega!`
-        ];
-        bot.chat(ownerGreetings[Math.floor(Math.random() * ownerGreetings.length)]);
-      } else {
-        const memberGreetings = [
-          `Yo @${player.username}! Welcome to the server!`,
-          `Hey @${player.username}, welcome! Sab theek thak?`
-        ];
-        bot.chat(memberGreetings[Math.floor(Math.random() * memberGreetings.length)]);
-      }
-    }, 2500);
-  });
-
-  // 3. Auto Respawn on Death
+  // 2. Auto Respawn on Death
   bot.on('death', () => {
     logGameEvent('Mar gayi!');
     stopAll(bot);
@@ -130,7 +111,7 @@ function startBot() {
     }, 2000);
   });
 
-  // 4. Human Physics, Hazard Avoidance & 12-Chunk Edge Protection
+  // 3. Human Physics, Hazard Avoidance & 12-Chunk Edge Protection
   bot.on('physicsTick', () => {
     // 12-Chunk Boundary Guard
     if (spawnAnchor) {
@@ -197,7 +178,7 @@ function startBot() {
     }
   });
 
-  // 5. Survival Engine: 50% Health Warning & Food Consumption
+  // 4. Survival Engine: 50% Health Warning & Food Consumption
   bot.on('health', async () => {
     if (isEating || isSleeping) return;
     const now = Date.now();
@@ -222,7 +203,7 @@ function startBot() {
     }
   });
 
-  // 6. Night Bed Sleep Routine
+  // 5. Night Bed Sleep Routine
   bot.on('time', async () => {
     if (isSleeping || isWorking) return;
     const time = bot.time.timeOfDay;
@@ -251,7 +232,7 @@ function startBot() {
     bot.chat('Subah ho gayi, uth gayi hu!');
   });
 
-  // 7. Self Defense with Critical Hits
+  // 6. Self Defense with Critical Hits
   bot.on('entityHurt', (entity) => {
     if (entity !== bot.entity) return;
     const attacker = bot.nearestEntity(e => 
@@ -261,7 +242,7 @@ function startBot() {
     if (attacker) proAttack(bot, attacker);
   });
 
-  // 8. Main Chat Router & Parser
+  // 7. Main Chat Router & Parser
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
     const cleanMsg = message.trim();
@@ -870,7 +851,7 @@ function runExploreCycle(bot) {
 // --- Gemma AI Brain via OpenRouter ---
 async function handleCassieAI(bot, sender, userPrompt) {
   if (!OPENROUTER_API_KEY) {
-    bot.chat(`@${sender} OPENROUTER_API_KEY set nahi hai!`);
+    bot.chat(`@${sender} OPENROUTER_API_KEY environment variable set nahi hai!`);
     return;
   }
 
