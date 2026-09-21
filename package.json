@@ -1,13 +1,13 @@
 {
   "name": "cassie-ai-companion",
-  "version": "2.0.0",
-  "description": "Smart AI Companion & AFK Bot for Minecraft",
+  "version": "2.2.0",
+  "description": "Autonomous AI Companion & AFK Bot powered by Google AI Studio GenAI SDK",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.7.7",
+    "@google/genai": "^0.1.2",
     "express": "^4.19.2",
     "minecraft-data": "^3.57.0",
     "mineflayer": "^4.22.0",
