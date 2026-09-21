@@ -22,7 +22,7 @@ const OWNERS = ['NotGamerSpark', 'DusraOwnerUsername'].map(o => o.toLowerCase())
 
 // Groq API Config
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_MODEL = 'openai/gpt-oss-120b';
 
 let afkInterval = null;
 let currentFollowTarget = null;
