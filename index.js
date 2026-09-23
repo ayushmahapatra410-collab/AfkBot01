@@ -12,7 +12,7 @@ app.get('/', (req, res) => res.send('Cassie is Online with GPT-4o-mini via OpenR
 app.listen(port, () => console.log(`[Web] Listening on port ${port}`));
 
 // --- Server Configurations ---
-const SERVER_IP = 'YSsmpontop.aternos.me';
+const SERVER_IP = 'fevermc.aternos.me';
 const BOT_USERNAME = 'Cassie';
 const VERSION = '1.20.4';
 const DEFAULT_SKIN = 'chloepowell';
